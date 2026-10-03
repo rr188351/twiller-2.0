@@ -48,7 +48,60 @@ interface AuthContextType {
   googlesignin: () => void;
 }
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
+/**
+ * Turns a raw Firebase / axios failure into a message that tells the user what
+ * actually went wrong.
+ *
+ * This exists because the original UI showed one generic
+ * "Authentication failed. Please try again." for EVERY failure, which made a
+ * wrong password indistinguishable from a stopped backend - the main reason
+ * the login problem was so hard to diagnose.
+ *
+ * The function preserves the original Firebase error so nothing about the
+ * authentication architecture changes.
+ */
+function toFriendlyAuthError(error: any): Error {
+  const rawMessage: string = error?.message || String(error || "");
+  const code: string = error?.code || "";
+
+  if (rawMessage.startsWith("ACCOUNT_NO_TWILLER_PROFILE")) {
+    return new Error(
+      "Signed in with Firebase, but no Twiller profile exists for this email. Create the account through the Sign up form first."
+    );
+  }
+
+  // Firebase rejected the credentials (wrong email/password, or the account
+  // does not exist in the CURRENTLY CONFIGURED Firebase project).
+  if (
+    code === "auth/invalid-credential" ||
+    code === "auth/wrong-password" ||
+    code === "auth/user-not-found" ||
+    code === "auth/invalid-email"
+  ) {
+    return new Error(
+      "Incorrect email or password. If you recently created a new Firebase project, make sure the NEXT_PUBLIC_FIREBASE_* values in twiller/.env.local match it."
+    );
+  }
+
+  if (code === "auth/email-already-in-use") {
+    return new Error("An account with that email already exists. Try signing in instead.");
+  }
+
+  if (code === "auth/too-many-requests") {
+    return new Error("Too many attempts. Please wait a moment and try again.");
+  }
+
+  // Axios could not reach the backend at all.
+  if (code === "ERR_NETWORK" || rawMessage.includes("Network Error")) {
+    return new Error(
+      "Cannot reach the Twiller backend. Make sure it is running (cd backend && npm start, port 5000)."
+    );
+  }
+
+  return error instanceof Error ? error : new Error(rawMessage || "Authentication failed.");
+}
+
+export const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const useAuth = () => {
   const context = useContext(AuthContext);
@@ -89,27 +142,44 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     return () => unsubcribe();
   }, []);
 
+  /**
+   * LOGIN RELIABILITY FIX
+   * --------------------
+   * `login` used to have no try/catch/finally, so when Firebase rejected the
+   * credentials `setIsLoading(false)` was never reached and `isLoading` stayed
+   * `true` FOREVER. `Mainlayout` renders a full-screen spinner while
+   * `isLoading` is true, so a single failed login left the whole app stuck on
+   * a spinner with no way out except reloading - which repeated the failure.
+   * That is the "stuck in a login/reload loop" symptom.
+   *
+   * The same defect existed in `signup`. Both are fixed here with try/finally,
+   * and the errors are re-thrown with a clear message so the UI can explain
+   * what actually went wrong instead of a generic "Authentication failed".
+   */
   const login = async (email: string, password: string) => {
     setIsLoading(true);
-    // Mock authentication - in real app, this would call an API
-    const usercred = await signInWithEmailAndPassword(auth, email, password);
-    const firebaseuser = usercred.user;
-    const res = await axiosInstance.get("/loggedinuser", {
-      params: { email: firebaseuser.email },
-    });
-    if (res.data) {
+    try {
+      const usercred = await signInWithEmailAndPassword(auth, email, password);
+      const firebaseuser = usercred.user;
+      const res = await axiosInstance.get("/loggedinuser", {
+        params: { email: firebaseuser.email },
+      });
+      if (!res.data) {
+        // Firebase accepted the credentials but Twiller has no profile for
+        // this email. Without this the app would silently stay on the landing
+        // page forever, because `user` would never be set.
+        throw new Error(
+          "ACCOUNT_NO_TWILLER_PROFILE: Firebase accepted these credentials, but no Twiller profile exists for this email address."
+        );
+      }
       setUser(res.data);
       localStorage.setItem("twitter-user", JSON.stringify(res.data));
+    } catch (error: any) {
+      throw toFriendlyAuthError(error);
+    } finally {
+      // ALWAYS clear the spinner, whatever happened.
+      setIsLoading(false);
     }
-    // const mockUser: User = {
-    //   id: '1',
-    //   username: 'johndoe',
-    //   displayName: 'John Doe',
-    //   avatar: 'https://images.pexels.com/photos/220453/pexels-photo-220453.jpeg?auto=compress&cs=tinysrgb&w=400',
-    //   bio: 'Software developer passionate about building great products',
-    //   joinedDate: 'April 2024'
-    // };
-    setIsLoading(false);
   };
 
   const signup = async (
@@ -119,33 +189,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     displayName: string
   ) => {
     setIsLoading(true);
-    // Mock authentication - in real app, this would call an API
-    const usercred = await createUserWithEmailAndPassword(
-      auth,
-      email,
-      password
-    );
-    const user = usercred.user;
-    const newuser: any = {
-      username,
-      displayName,
-      avatar: user.photoURL || "https://images.pexels.com/photos/1139743/pexels-photo-1139743.jpeg?auto=compress&cs=tinysrgb&w=400",
-      email: user.email,
-    };
-    const res = await axiosInstance.post("/register", newuser);
-    if (res.data) {
-      setUser(res.data);
-      localStorage.setItem("twitter-user", JSON.stringify(res.data));
+    // Same spinner-stuck defect as `login`, fixed the same way.
+    try {
+      const usercred = await createUserWithEmailAndPassword(
+        auth,
+        email,
+        password
+      );
+      const user = usercred.user;
+      const newuser: any = {
+        username,
+        displayName,
+        avatar: user.photoURL || "https://images.pexels.com/photos/1139743/pexels-photo-1139743.jpeg?auto=compress&cs=tinysrgb&w=400",
+        email: user.email,
+      };
+      const res = await axiosInstance.post("/register", newuser);
+      if (res.data) {
+        setUser(res.data);
+        localStorage.setItem("twitter-user", JSON.stringify(res.data));
+      }
+    } catch (error: any) {
+      throw toFriendlyAuthError(error);
+    } finally {
+      setIsLoading(false);
     }
-    // const mockUser: User = {
-    //   id: '1',
-    //   username,
-    //   displayName,
-    //   avatar: 'https://images.pexels.com/photos/1139743/pexels-photo-1139743.jpeg?auto=compress&cs=tinysrgb&w=400',
-    //   bio: '',
-    //   joinedDate: new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
-    // };
-    setIsLoading(false);
   };
 
   const logout = async () => {

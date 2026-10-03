@@ -86,8 +86,12 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
       onClose();
       setFormData({ email: '', password: '', username: '', displayName: '' });
       setErrors({});
-    } catch (error) {
-      setErrors({ general: 'Authentication failed. Please try again.' });
+    } catch (error: any) {
+      // Show the REAL reason (wrong password, backend down, missing profile)
+      // instead of one generic message for every failure.
+      setErrors({
+        general: error?.message || "Authentication failed. Please try again.",
+      });
     }
   };
 
