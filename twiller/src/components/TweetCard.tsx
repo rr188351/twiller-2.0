@@ -50,7 +50,12 @@ export default function TweetCard({ tweet }: any) {
   const isLiked = tweetstate.likedBy?.includes(user?._id);
   const isRetweet = tweetstate.retweetedBy?.includes(user?._id);
   return (
-    <Card className="bg-black border-gray-800 border-x-0 border-t-0 rounded-none hover:bg-gray-950/50 transition-colors cursor-pointer">
+    <Card
+      // Stable anchor so a clicked notification can scroll to and highlight
+      // this exact tweet (Internship Feature 3). Uses the tweet _id.
+      id={`tweet-${tweet._id}`}
+      className="bg-black border-gray-800 border-x-0 border-t-0 rounded-none hover:bg-gray-950/50 transition-colors cursor-pointer"
+    >
       <CardContent className="p-4">
         <div className="flex space-x-3">
           <Avatar className="h-12 w-12">

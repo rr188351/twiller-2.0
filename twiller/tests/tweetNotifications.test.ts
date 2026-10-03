@@ -19,6 +19,10 @@ import {
   seedExistingTweets,
   resetNotifiedTweets,
   hasNotified,
+  setPendingTweetId,
+  consumePendingTweetId,
+  getPendingTweetId,
+  OPEN_TWEET_EVENT,
 } from "../src/lib/tweetNotifications.ts";
 
 let passed = 0;
@@ -221,6 +225,89 @@ resetNotifiedTweets();
     notifier: thrower,
   });
   check("a throwing notifier never breaks the feed", !result.notified);
+}
+
+console.log("\n[9] NOTIFICATION CLICK -> reveal the tweet (pending tweet id handoff)");
+{
+  check("no pending tweet id initially", getPendingTweetId() === null);
+
+  setPendingTweetId("tweet-abc123");
+  check("pending tweet id is stored", getPendingTweetId() === "tweet-abc123");
+
+  const consumed = consumePendingTweetId();
+  check("feed receives the tweet id on mount", consumed === "tweet-abc123");
+  check("pending id is cleared after consuming", getPendingTweetId() === null);
+  check("a second consume returns null", consumePendingTweetId() === null);
+}
+
+console.log("\n[10] EVENT NAME is stable (Feed and Mainlayout rely on it)");
+check("event name is twiller:open-tweet", OPEN_TWEET_EVENT === "twiller:open-tweet");
+
+console.log("\n[11] CLICKING the notification reveals the tweet");
+{
+  resetNotifiedTweets();
+  const g = globalThis as unknown as Record<string, unknown>;
+  const originalWindow = g.window;
+  const originalNotification = g.Notification;
+
+  const dispatched: Array<{ type: string; detail: any }> = [];
+  let focused = 0;
+  let closed = 0;
+
+  class FakeNotification {
+    static permission = "granted";
+    onclick: (() => void) | null = null;
+    title: string;
+    options: any;
+    constructor(title: string, options: any) {
+      this.title = title;
+      this.options = options;
+      instances.push(this);
+    }
+    close() {
+      closed += 1;
+    }
+  }
+  const instances: FakeNotification[] = [];
+
+  g.window = {
+    focus: () => {
+      focused += 1;
+    },
+    dispatchEvent: (e: any) => {
+      dispatched.push({ type: e.type, detail: e.detail });
+      return true;
+    },
+  };
+  g.Notification = FakeNotification;
+
+  const result = notifyIfMatching(
+    { _id: "click-42", content: "cricket and science everywhere" },
+    { enabled: true, permission: "granted" }
+  );
+
+  check("notification was created", result.notified && instances.length === 1);
+  check("full tweet text is the body", instances[0]?.options?.body === "cricket and science everywhere");
+
+  // THE BUG BEING FIXED: there was no onclick at all before.
+  check("an onclick handler IS attached", typeof instances[0]?.onclick === "function");
+
+  // Simulate the user clicking the notification.
+  instances[0]?.onclick?.();
+
+  check("window was focused", focused >= 1, `focused=${focused}`);
+  check("the open-tweet event was dispatched", dispatched.length === 1, JSON.stringify(dispatched));
+  check("event type is twiller:open-tweet", dispatched[0]?.type === "twiller:open-tweet");
+  check("event carries the tweet id", dispatched[0]?.detail?.tweetId === "click-42");
+  check("the tweet id was stored for the feed", getPendingTweetId() === "click-42");
+  check("the notification was closed after clicking", closed === 1);
+  check(
+    "the feed can consume the id handoff",
+    consumePendingTweetId() === "click-42"
+  );
+
+  g.window = originalWindow;
+  g.Notification = originalNotification;
 }
 
 console.log(`\n==================================================`);

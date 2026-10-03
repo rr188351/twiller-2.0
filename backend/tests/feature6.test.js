@@ -16,9 +16,11 @@
 import "dotenv/config";
 import mongoose from "mongoose";
 import PasswordReset from "../models/passwordreset.js";
+import { startTestServer, removeTestFixtures } from "./helpers/testServer.js";
 
-const BASE = process.env.BASE_URL || "http://localhost:5000";
-const MONGO_URL = process.env.MONOGDB_URL || process.env.MONGODB_URL;
+let BASE = "http://localhost:5000";
+// Points at the ISOLATED test database, never the development one.
+let MONGO_URL = process.env.MONOGDB_URL || process.env.MONGODB_URL;
 
 let passed = 0;
 let failed = 0;
@@ -61,8 +63,13 @@ async function register(username, email, phone) {
 }
 
 async function main() {
+  const server = await startTestServer();
+  BASE = server.base;
+  MONGO_URL = server.mongoUrl;
+
   console.log(`\nTwiller 2.0 - Feature 6 (Forgot Password) test suite`);
-  console.log(`Target: ${BASE}\n`);
+  console.log(`Target   : ${BASE}`);
+  console.log(`Database : ${MONGO_URL}  (isolated - development DB untouched)\n`);
 
   // One shared database connection for the whole suite.
   if (MONGO_URL) {
@@ -187,10 +194,14 @@ async function main() {
   }
   check("per-IP rate limiter returns 429", limited, "never rate limited");
 
+  if (MONGO_URL) await mongoose.disconnect();
+  await removeTestFixtures(server.mongoUrl, ["fp\\."], []);
+  await server.stop();
+  console.log("  ....  test database dropped; development database never touched");
+
   console.log("\n==================================================");
   console.log(`  passed: ${passed}   failed: ${failed}`);
   console.log("==================================================\n");
-  if (MONGO_URL) await mongoose.disconnect();
   process.exit(failed === 0 ? 0 : 1);
 }
 

@@ -96,6 +96,61 @@ export async function requestNotificationPermission(): Promise<PermissionState> 
  */
 const notifiedTweetIds = new Set<string>();
 
+/**
+ * --- Notification click -> reveal the tweet -------------------------------
+ *
+ * The browser Notification API does nothing when it is clicked unless an
+ * `onclick` handler is supplied. That was the bug: clicking the notification
+ * simply left the user where they were.
+ *
+ * We deliberately do NOT add routing. Twiller has a single page and
+ * `Mainlayout` already swaps views with a `currentPage` state, so the handler
+ * only needs to:
+ *   1. focus the window,
+ *   2. remember the tweet id (so it still works if the feed mounts later),
+ *   3. fire a plain DOM event that Mainlayout and Feed already listen for.
+ * The tweet id is the stable identifier throughout.
+ */
+export const OPEN_TWEET_EVENT = "twiller:open-tweet";
+
+let pendingTweetId: string | null = null;
+
+/** Called by the notification click handler. */
+export function setPendingTweetId(tweetId: string): void {
+  pendingTweetId = tweetId;
+}
+
+/**
+ * Returns and clears the stored tweet id. `Feed` calls this when it mounts,
+ * which covers the case where the user was on the Profile view (so the feed
+ * was not mounted) at the moment the notification was clicked.
+ */
+export function consumePendingTweetId(): string | null {
+  const id = pendingTweetId;
+  pendingTweetId = null;
+  return id;
+}
+
+/** Test helper. */
+export function getPendingTweetId(): string | null {
+  return pendingTweetId;
+}
+
+/**
+ * The default click behaviour: focus the tab and ask the app to reveal the
+ * tweet. Safe to call in a non-browser context (it simply does nothing).
+ */
+export function openTweet(tweetId: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    setPendingTweetId(tweetId);
+    window.focus?.();
+    window.dispatchEvent(new CustomEvent(OPEN_TWEET_EVENT, { detail: { tweetId } }));
+  } catch {
+    /* never let a click handler break the page */
+  }
+}
+
 /** Test helper - clears the "already notified" memory. */
 export function resetNotifiedTweets(): void {
   notifiedTweetIds.clear();
@@ -190,7 +245,21 @@ export function notifyIfMatching(
     options.notifier ??
     ((t: string, o: NotificationOptions) => {
       // `tag` groups/replaces rather than stacking duplicates.
-      new Notification(t, { body: o.body, tag: o.tag, silent: true });
+      const notification = new Notification(t, {
+        body: o.body,
+        tag: o.tag,
+        silent: true,
+      });
+      // Clicking the notification reveals the matching tweet in the feed.
+      notification.onclick = () => {
+        try {
+          window.focus();
+          openTweet(tweet._id);
+          notification.close();
+        } catch {
+          /* never let a click handler break the page */
+        }
+      };
     });
 
   try {

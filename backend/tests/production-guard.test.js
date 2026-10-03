@@ -11,10 +11,16 @@ import "dotenv/config";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import mongoose from "mongoose";
+import { buildTestMongoUrl } from "./helpers/testServer.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 5099;
 const BASE = `http://localhost:${PORT}`;
+// Isolated test database - this suite must never write to the development DB.
+const MONGO_URL =
+  process.env.TEST_MONGO_URL ||
+  buildTestMongoUrl(process.env.MONOGDB_URL || process.env.MONGODB_URL);
 
 let passed = 0;
 let failed = 0;
@@ -43,7 +49,7 @@ async function waitForServer(url, tries = 30) {
 
 const server = spawn(process.execPath, ["index.js"], {
   cwd: path.join(here, ".."),
-  env: { ...process.env, NODE_ENV: "production", PORT: String(PORT) },
+  env: { ...process.env, NODE_ENV: "production", PORT: String(PORT), MONOGDB_URL: MONGO_URL, MONGODB_URL: MONGO_URL },
 });
 
 let log = "";
@@ -99,6 +105,14 @@ async function main() {
   console.log("==================================================\n");
 
   server.kill();
+  // Drop the isolated test database; the development DB is untouched.
+  try {
+    await mongoose.connect(MONGO_URL);
+    await mongoose.connection.dropDatabase();
+    await mongoose.disconnect();
+  } catch {
+    /* best effort */
+  }
   process.exit(failed === 0 ? 0 : 1);
 }
 

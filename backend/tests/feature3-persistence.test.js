@@ -12,7 +12,10 @@
  * Run:  node tests/feature3-persistence.test.js
  */
 
-const BASE = process.env.BASE_URL || "http://localhost:5000";
+import "dotenv/config";
+import { startTestServer, removeTestFixtures } from "./helpers/testServer.js";
+
+let BASE = "http://localhost:5000";
 
 let passed = 0;
 let failed = 0;
@@ -43,8 +46,11 @@ async function call(path, { method = "GET", body } = {}) {
 }
 
 async function main() {
+  const server = await startTestServer();
+  BASE = server.base;
   console.log("\nTwiller 2.0 - Feature 3 persistence test");
-  console.log(`Target: ${BASE}\n`);
+  console.log(`Target   : ${BASE}`);
+  console.log(`Database : ${server.mongoUrl}  (isolated - development DB untouched)\n`);
 
   const stamp = Date.now();
   const email = `f3.${stamp}@twiller.test`;
@@ -87,6 +93,10 @@ async function main() {
   console.log("\n[5] unrelated profile fields are untouched by the partial update");
   check("username preserved", on.body?.username === `f3_${stamp}`);
   check("email preserved", on.body?.email === email);
+
+  await removeTestFixtures(server.mongoUrl, ["f3\\."], []);
+  await server.stop();
+  console.log("  ....  test database dropped; development database never touched");
 
   console.log(`\n==================================================`);
   console.log(`  passed: ${passed}   failed: ${failed}`);

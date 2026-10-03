@@ -15,9 +15,17 @@
  *   POST /retweet/:tweetid      retweet a tweet
  *
  * Run:  node tests/regression.test.js
+ *
+ * DATABASE SAFETY
+ *   This suite starts its OWN backend process on a spare port, bound to a
+ *   SEPARATE test database (`twiller_test`). The development database is never
+ *   read or written, and the test database is dropped when the run finishes.
+ *   It also deletes only the fixtures it created.
  */
 
-const BASE = process.env.BASE_URL || "http://localhost:5000";
+import "dotenv/config";
+import mongoose from "mongoose";
+import { startTestServer, removeTestFixtures } from "./helpers/testServer.js";
 
 let passed = 0;
 let failed = 0;
@@ -31,8 +39,8 @@ const check = (name, ok, detail = "") => {
   }
 };
 
-async function call(path, { method = "GET", body } = {}) {
-  const res = await fetch(`${BASE}${path}`, {
+async function call(base, path, { method = "GET", body } = {}) {
+  const res = await fetch(`${base}${path}`, {
     method,
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
@@ -49,19 +57,23 @@ async function call(path, { method = "GET", body } = {}) {
 }
 
 async function main() {
+  const server = await startTestServer();
+  const BASE = server.base;
+
   console.log(`\nTwiller 2.0 - regression suite (original functionality)`);
-  console.log(`Target: ${BASE}\n`);
+  console.log(`Target   : ${BASE}`);
+  console.log(`Database : ${server.mongoUrl}  (isolated - development DB untouched)\n`);
 
   const stamp = Date.now();
   const email = `regress.${stamp}@twiller.test`;
 
   console.log("[1] GET /");
-  const health = await call("/");
+  const health = await call(BASE, "/");
   check("health endpoint responds 200", health.status === 200, `got ${health.status}`);
   check("health message unchanged", health.text.includes("Twiller backend is running successfully"));
 
   console.log("\n[2] POST /register");
-  const reg = await call("/register", {
+  const reg = await call(BASE, "/register", {
     method: "POST",
     body: { username: `regress_${stamp}`, displayName: "Regression User", avatar: "https://example.com/a.png", email },
   });
@@ -71,12 +83,12 @@ async function main() {
   check("new phone field defaults cleanly", reg.body?.phone === "");
 
   console.log("\n[3] GET /loggedinuser");
-  const login = await call(`/loggedinuser?email=${encodeURIComponent(email)}`);
+  const login = await call(BASE, `/loggedinuser?email=${encodeURIComponent(email)}`);
   check("profile lookup returns 200", login.status === 200, `got ${login.status}`);
   check("profile matches the registered user", login.body?._id === userId);
 
   console.log("\n[4] PATCH /userupdate/:email");
-  const upd = await call(`/userupdate/${encodeURIComponent(email)}`, {
+  const upd = await call(BASE, `/userupdate/${encodeURIComponent(email)}`, {
     method: "PATCH",
     body: { bio: "regression bio", location: "Test City", website: "example.com" },
   });
@@ -85,7 +97,7 @@ async function main() {
   check("location was saved", upd.body?.location === "Test City");
 
   console.log("\n[5] POST /post");
-  const post = await call("/post", {
+  const post = await call(BASE, "/post", {
     method: "POST",
     body: { author: userId, content: `regression tweet ${stamp}`, image: "" },
   });
@@ -94,7 +106,7 @@ async function main() {
   check("tweet returns the original shape", Boolean(tweetId && post.body.content && post.body.likes === 0));
 
   console.log("\n[6] GET /post");
-  const list = await call("/post");
+  const list = await call(BASE, "/post");
   check("tweet list returns 200", list.status === 200, `got ${list.status}`);
   check("list is an array", Array.isArray(list.body) && list.body.length > 0);
   const found = list.body.find((t) => t._id === tweetId);
@@ -102,23 +114,38 @@ async function main() {
   check("author is populated (original .populate behaviour)", found?.author?.username === `regress_${stamp}`);
 
   console.log("\n[7] POST /like/:tweetid");
-  const like = await call(`/like/${tweetId}`, { method: "POST", body: { userId } });
+  const like = await call(BASE, `/like/${tweetId}`, { method: "POST", body: { userId } });
   check("like returns 200", like.status === 200, `got ${like.status}`);
   check("likes incremented", like.body?.likes === 1, `got ${like.body?.likes}`);
   check("likedBy contains the user", like.body?.likedBy?.includes(userId));
 
   console.log("\n[8] POST /retweet/:tweetid");
-  const rt = await call(`/retweet/${tweetId}`, { method: "POST", body: { userId } });
+  const rt = await call(BASE, `/retweet/${tweetId}`, { method: "POST", body: { userId } });
   check("retweet returns 200", rt.status === 200, `got ${rt.status}`);
   check("retweets incremented", rt.body?.retweets === 1, `got ${rt.body?.retweets}`);
   check("retweetedBy contains the user", rt.body?.retweetedBy?.includes(userId));
 
   console.log("\n[9] duplicate register is still idempotent (original behaviour)");
-  const dup = await call("/register", {
+  const dup = await call(BASE, "/register", {
     method: "POST",
     body: { username: `regress_${stamp}`, displayName: "Regression User", avatar: "https://example.com/a.png", email },
   });
   check("duplicate register returns 200 with the existing user", dup.status === 200 && dup.body?._id === userId);
+
+  // ---- clean up ONLY what this run created --------------------------
+  const cleaned = await removeTestFixtures(
+    server.mongoUrl,
+    ["regress\\."],
+    ["regression tweet"]
+  );
+  check(
+    "test fixtures were removed from the test database",
+    cleaned.users.deletedCount >= 1 && cleaned.tweets.deletedCount >= 1,
+    JSON.stringify(cleaned)
+  );
+
+  await server.stop();
+  console.log("  ....  test database dropped; development database never touched");
 
   console.log(`\n==================================================`);
   console.log(`  passed: ${passed}   failed: ${failed}`);

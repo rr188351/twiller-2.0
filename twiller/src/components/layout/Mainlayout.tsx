@@ -1,14 +1,25 @@
 "use client";
 import { useAuth } from "@/context/AuthContext";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import LoadingSpinner from "../loading-spinner";
 import Sidebar from "./Sidebar";
 import RightSidebar from "./Rightsidebar";
 import ProfilePage from "../ProfilePage";
+// Internship Feature 3 - used to switch back to Home when a notification is
+// clicked while the user is on the Profile view. This reuses the existing
+// `currentPage` state; no routing library is introduced.
+import { OPEN_TWEET_EVENT } from "@/lib/tweetNotifications";
 
 const Mainlayout = ({ children }: { children: React.ReactNode }) => {
   const { user, isLoading } = useAuth();
   const [currentPage, setCurrentPage] = useState("home");
+
+  // A clicked notification should always land the user on the feed.
+  useEffect(() => {
+    const goHome = () => setCurrentPage("home");
+    window.addEventListener(OPEN_TWEET_EVENT, goHome);
+    return () => window.removeEventListener(OPEN_TWEET_EVENT, goHome);
+  }, []);
 
   if (isLoading) {
     return (

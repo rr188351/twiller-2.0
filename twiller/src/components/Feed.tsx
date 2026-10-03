@@ -8,7 +8,12 @@ import axiosInstance from "@/lib/axiosInstance";
 // Internship Feature 3 - browser notifications. The feed already receives the
 // full tweet text from the EXISTING `/post` endpoint, so no new backend route
 // is needed: matching happens right here in the browser.
-import { notifyIfMatching, seedExistingTweets } from "@/lib/tweetNotifications";
+import {
+  notifyIfMatching,
+  seedExistingTweets,
+  consumePendingTweetId,
+  OPEN_TWEET_EVENT,
+} from "@/lib/tweetNotifications";
 import { useAuth } from "@/context/AuthContext";
 
 interface Tweet {
@@ -96,6 +101,27 @@ const Feed = () => {
   // preference from their profile.
   const { user } = useAuth();
   const [loading, setloading] = useState(false);
+  const [revealNotice, setRevealNotice] = useState("");
+
+  /**
+   * Internship Feature 3 - scroll to a tweet and briefly highlight it.
+   * `TweetCard` renders `id={`tweet-${tweet._id}`}`, so the tweet id is the
+   * stable anchor. No routing is involved.
+   */
+  const revealTweet = (tweetId: string) => {
+    const element = document.getElementById(`tweet-${tweetId}`);
+    if (!element) {
+      setRevealNotice("That tweet is not in your feed right now.");
+      setTimeout(() => setRevealNotice(""), 4000);
+      return;
+    }
+    element.scrollIntoView({ behavior: "smooth", block: "center" });
+    element.classList.add("ring-2", "ring-blue-500", "bg-blue-900/10");
+    setTimeout(() => {
+      element.classList.remove("ring-2", "ring-blue-500", "bg-blue-900/10");
+    }, 3000);
+    setRevealNotice("");
+  };
   const fetchTweets = async () => {
     try {
       setloading(true);
@@ -114,6 +140,30 @@ const Feed = () => {
   useEffect(() => {
     fetchTweets();
   }, []);
+
+  // Internship Feature 3 - handle "reveal this tweet" requests.
+  // Two paths cover every case:
+  //   a) the feed is already mounted -> the event fires immediately;
+  //   b) the user was on the Profile view -> Mainlayout switches to Home, this
+  //      feed mounts, and consumePendingTweetId() picks the target back up.
+  useEffect(() => {
+    const reveal = (event: Event) => {
+      const tweetId = (event as CustomEvent<{ tweetId?: string }>).detail?.tweetId;
+      if (tweetId) revealTweet(tweetId);
+    };
+
+    const revealPending = () => {
+      const tweetId = consumePendingTweetId();
+      if (tweetId) revealTweet(tweetId);
+    };
+
+    window.addEventListener(OPEN_TWEET_EVENT, reveal);
+    // Runs on mount (covers case b) and again whenever the list changes,
+    // because a newly loaded tweet may not have been in the DOM before.
+    revealPending();
+
+    return () => window.removeEventListener(OPEN_TWEET_EVENT, reveal);
+  }, [tweets]);
   const handlenewtweet = (newtweet: any) => {
     setTweets((prev: any) => [newtweet, ...prev]);
     // Internship Feature 3: this is the single place a genuinely NEW tweet
@@ -129,6 +179,12 @@ const Feed = () => {
   };
   return (
     <div className="min-h-screen">
+      {/* Internship Feature 3 - shown when a clicked tweet is not in the feed */}
+      {revealNotice && (
+        <div className="px-4 py-2 text-sm text-amber-300 bg-amber-900/20 border-b border-amber-900/40">
+          {revealNotice}
+        </div>
+      )}
       <div className="sticky top-0 bg-black/90 backdrop-blur-md border-b border-gray-800 z-10">
         <div className="px-4 py-3">
           <h1 className="text-xl font-bold text-white">Home</h1>
