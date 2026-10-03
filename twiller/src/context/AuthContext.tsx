@@ -22,6 +22,9 @@ interface User {
   email: string;
   website: string;
   location: string;
+  // Internship features (optional on older profiles so nothing breaks).
+  phone?: string;
+  notificationsEnabled?: boolean;
 }
 
 interface AuthContextType {

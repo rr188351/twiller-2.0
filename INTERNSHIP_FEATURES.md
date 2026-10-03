@@ -120,3 +120,91 @@ The phone channel completes the change through Firebase's email reset. This is
 documented above and is a deliberate design choice, not an oversight.
 
 ---
+## Feature 3 - Browser Notifications  (implemented)
+
+### What the assignment asked for
+- Use the browser's **native Notification API**
+- When a **newly posted tweet contains BOTH "cricket" AND "science"**, raise a
+  browser notification showing the **full tweet text**
+- Matching must be **case-insensitive**
+- A tweet with only one of the two words must **not** notify
+- The user must be able to **enable/disable** it from the profile
+- Never spam the user with repeated permission prompts
+
+### Design decision: zero new backend infrastructure
+The existing `GET /post` route already returns every tweet with its full
+`content`, and `TweetComposer` already hands newly posted tweets to `Feed`
+through the existing `onTweetPosted` callback. Matching therefore happens
+**entirely in the browser**. **No new route, collection, service or dependency
+was added.**
+
+The only backend change is one optional boolean on the existing User model so
+the preference survives a page reload. It is saved through Twiller's existing
+`PATCH /userupdate/:email` route.
+
+### How the rules are enforced
+`src/lib/tweetNotifications.ts` is plain TypeScript with no React import, so the
+rules are unit-testable by Node alone. `notifyIfMatching()` applies the checks
+in this order and returns the reason it did or did not notify:
+
+1. `enabled === false` -> `disabled-by-user`
+2. browser has no Notification API -> `unsupported`
+3. permission is not `granted` (`default` **or** `denied`) -> `permission-not-granted`
+4. tweet has no id -> `missing-id`
+5. text does not contain BOTH keywords -> `no-keyword-match`
+6. tweet id already notified -> `duplicate`
+7. otherwise -> show the notification
+
+### Permission states
+| State | Behaviour |
+|---|---|
+| `default` | `requestPermission()` is called **only** from the settings toggle, i.e. a genuine user gesture. Never on page load. |
+| `granted` | Notifications are shown. |
+| `denied` | Never prompted again. The settings card explains how to re-enable in browser site settings. |
+
+### Files added
+| File | Purpose |
+|---|---|
+| `twiller/src/lib/tweetNotifications.ts` | Pure matching + delivery logic. No React, no dependencies, Node-testable. |
+| `twiller/src/components/NotificationSettings.tsx` | The on/off card with permission handling. Built from Twiller's existing shadcn `Card`/`Button` + lucide icons. |
+| `twiller/tests/tweetNotifications.test.ts` | 43 assertions, run with plain `node` (Node 24 strips types). No test framework installed. |
+| `backend/tests/feature3-persistence.test.js` | 9 assertions proving the preference defaults on and round-trips through MongoDB. |
+
+### Files changed
+| File | Change |
+|---|---|
+| `twiller/src/components/Feed.tsx` | +13 lines. One call in `handlenewtweet()` (new tweet -> maybe notify) and one call in `fetchTweets()` (seed history so it never re-notifies). |
+| `twiller/src/components/ProfilePage.tsx` | +3 lines. Renders `<NotificationSettings />` above the tab bar. |
+| `twiller/src/context/AuthContext.tsx` | +3 lines. Type-only: added `phone?` and `notificationsEnabled?` to the `User` interface. |
+| `backend/models/user.js` | +3 lines. Optional `notificationsEnabled`, default `true`. |
+| `twiller/tsconfig.json` | +1 line. `allowImportingTsExtensions` so the Node-run test can import a `.ts` path. |
+
+### Database changes
+- **No new collection. No new route.**
+- One optional field: `users.notificationsEnabled` (Boolean, default `true`),
+  so every existing profile keeps the same behaviour with no migration.
+
+### Known limitations
+1. **Desktop browsers may visually truncate a long notification body.** The
+   full text is always sent as `body`; truncation is an OS-level limitation.
+   The `tag` property means a repeat for the same tweet replaces rather than
+   stacks.
+2. **Notifications fire for tweets the browser actually receives.** The
+   existing Twiller feed fetches once on mount, so in practice this means the
+   user's own new posts. Real-time push for other users' tweets would require a
+   push server (Service Worker + `web-push`, or FCM) - deliberately **not**
+   added, per the "no unnecessary infrastructure" requirement.
+3. Notifications require **HTTPS** (or `localhost`) to work in the browser.
+
+### How to run the tests
+```bash
+cd twiller
+node tests/tweetNotifications.test.ts     # 43 assertions
+
+cd ../backend
+node index.js                              # in another terminal
+node tests/feature3-persistence.test.js    # 9 assertions
+```
+
+---
+

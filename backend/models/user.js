@@ -8,6 +8,10 @@ const UserSchema = mongoose.Schema({
   // password recovery). Optional so that every existing user document keeps
   // working unchanged - MongoDB simply reports "" for older records.
   phone: { type: String, default: "" },
+  // Internship Feature 3 - browser notifications for tweets containing both
+  // "cricket" and "science". Defaults to true so existing users keep the same
+  // behaviour without needing to change anything.
+  notificationsEnabled: { type: Boolean, default: true },
   bio: { type: String, default: "" },
   location: { type: String, default: "" },
   website: { type: String, default: "" },

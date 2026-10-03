@@ -5,6 +5,11 @@ import LoadingSpinner from "./loading-spinner";
 import TweetCard from "./TweetCard";
 import TweetComposer from "./TweetComposer";
 import axiosInstance from "@/lib/axiosInstance";
+// Internship Feature 3 - browser notifications. The feed already receives the
+// full tweet text from the EXISTING `/post` endpoint, so no new backend route
+// is needed: matching happens right here in the browser.
+import { notifyIfMatching, seedExistingTweets } from "@/lib/tweetNotifications";
+import { useAuth } from "@/context/AuthContext";
 
 interface Tweet {
   id: string;
@@ -87,12 +92,19 @@ const tweets: Tweet[] = [
 ];
 const Feed = () => {
   const [tweets, setTweets] = useState<any>([]);
+  // Internship Feature 3 - needed to read the user's notificationsEnabled
+  // preference from their profile.
+  const { user } = useAuth();
   const [loading, setloading] = useState(false);
   const fetchTweets = async () => {
     try {
       setloading(true);
       const res = await axiosInstance.get("/post");
       setTweets(res.data);
+      // Internship Feature 3: mark the existing timeline as already seen so
+      // old matching tweets never fire a notification on page load. Only
+      // genuinely NEW tweets should notify from now on.
+      seedExistingTweets(res.data);
     } catch (error) {
       console.error(error);
     } finally {
@@ -104,6 +116,16 @@ const Feed = () => {
   }, []);
   const handlenewtweet = (newtweet: any) => {
     setTweets((prev: any) => [newtweet, ...prev]);
+    // Internship Feature 3: this is the single place a genuinely NEW tweet
+    // enters the feed. It only raises a notification when the tweet contains
+    // BOTH "cricket" and "science", the user has the setting switched on and
+    // the browser permission is "granted". Never throws, so posting still
+    // works even if notifications are unavailable.
+    try {
+      notifyIfMatching(newtweet, { enabled: user?.notificationsEnabled !== false });
+    } catch (notificationError) {
+      console.warn("Notification skipped:", notificationError);
+    }
   };
   return (
     <div className="min-h-screen">

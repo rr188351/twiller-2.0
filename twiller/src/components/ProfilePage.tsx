@@ -17,6 +17,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import TweetCard from "./TweetCard";
 import { Card, CardContent } from "./ui/card";
 import Editprofile from "./Editprofile";
+// Internship Feature 3 - enable/disable browser notifications from the profile.
+import NotificationSettings from "./NotificationSettings";
 import axiosInstance from "@/lib/axiosInstance";
 
 interface Tweet {
@@ -231,6 +233,9 @@ export default function ProfilePage() {
           </div>
         </div>
       </div>
+
+      {/* Internship Feature 3 - notification preference */}
+      <NotificationSettings />
 
       {/* Tabs */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
