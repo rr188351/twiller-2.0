@@ -12,6 +12,9 @@ import { Input } from './ui/input';
 import { Separator } from './ui/separator';
 import { useAuth } from '@/context/AuthContext';
 import TwitterLogo from './Twitterlogo';
+// Internship Feature 6 - Forgot Password. Reuses this modal as the entry
+// point, exactly like Twiller reuses its other components.
+import ForgotPassword from './ForgotPassword';
 
 
 
@@ -32,6 +35,8 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
     displayName: ''
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  // Internship Feature 6 - opens the ForgotPassword modal.
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
 
   if (!isOpen) return null;
 
@@ -100,6 +105,8 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
   };
 
   return (
+    <>
+    {!showForgotPassword && (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
       <Card className="w-full max-w-md bg-black border-gray-800 text-white">
         <CardHeader className="relative pb-6">
@@ -218,6 +225,19 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
               )}
             </div>
 
+            {/* Internship Feature 6 - entry point for password recovery */}
+            {mode === 'login' && (
+              <div className="text-right">
+                <button
+                  type="button"
+                  onClick={() => setShowForgotPassword(true)}
+                  className="text-sm text-blue-400 hover:text-blue-300 font-medium"
+                >
+                  Forgot password?
+                </button>
+              </div>
+            )}
+
             <Button
               type="submit"
               className="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 rounded-full text-lg"
@@ -263,5 +283,13 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
         </CardContent>
       </Card>
     </div>
+    )}
+
+    {/* Internship Feature 6 - Forgot Password modal */}
+    <ForgotPassword
+      isOpen={showForgotPassword}
+      onClose={() => setShowForgotPassword(false)}
+    />
+    </>
   );
 }

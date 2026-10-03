@@ -34,3 +34,20 @@ const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export default app;
 
+/**
+ * Re-exported so feature components can use Firebase's built-in password
+ * reset WITHOUT importing from "firebase/auth" everywhere.
+ *
+ * Twiller deliberately reuses these official Firebase functions for
+ * Internship Feature 6 (Forgot Password) instead of building a second,
+ * competing password system:
+ *   sendPasswordResetEmail -> emails a reset code (or reset link)
+ *   confirmPasswordReset   -> applies the new password
+ */
+export {
+  sendPasswordResetEmail,
+  confirmPasswordReset,
+  verifyPasswordResetCode,
+} from "firebase/auth";
+
+
