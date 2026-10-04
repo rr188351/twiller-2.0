@@ -230,24 +230,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   }) => {
     if (!user) return;
 
+    // Same permanent-spinner defect that affected login/signup: without a
+    // finally block a failed request left isLoading stuck on true, which
+    // freezes the whole app on Mainlayout's spinner.
     setIsLoading(true);
-    // Mock API call - in real app, this would call an API
-    // await new Promise((resolve) => setTimeout(resolve, 1000));
-
-    const updatedUser: User = {
-      ...user,
-      ...profileData,
-    };
-    const res = await axiosInstance.patch(
-      `/userupdate/${user.email}`,
-      updatedUser
-    );
-    if (res.data) {
-      setUser(updatedUser);
-      localStorage.setItem("twitter-user", JSON.stringify(updatedUser));
+    try {
+      const updatedUser: User = {
+        ...user,
+        ...profileData,
+      };
+      const res = await axiosInstance.patch(
+        `/userupdate/${user.email}`,
+        updatedUser
+      );
+      if (res.data) {
+        setUser(updatedUser);
+        localStorage.setItem("twitter-user", JSON.stringify(updatedUser));
+      }
+    } catch (error: any) {
+      // Re-thrown so the caller (Editprofile) can show the real reason
+      // instead of failing silently.
+      throw toFriendlyAuthError(error);
+    } finally {
+      setIsLoading(false);
     }
-
-    setIsLoading(false);
   };
   const googlesignin = async () => {
     setIsLoading(true);

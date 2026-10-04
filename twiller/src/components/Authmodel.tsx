@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 
 import { X, Mail, Lock, User, Eye, EyeOff } from 'lucide-react';
 
@@ -37,6 +37,28 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
   const [errors, setErrors] = useState<Record<string, string>>({});
   // Internship Feature 6 - opens the ForgotPassword modal.
   const [showForgotPassword, setShowForgotPassword] = useState(false);
+
+  /**
+   * BUG FIX - the modal ignored which button was clicked.
+   *
+   * `Landing` renders this component permanently and only hides it with
+   * `isOpen`, and its `authMode` state defaults to "signup". Because
+   * `useState(initialMode)` only reads the prop on the FIRST render, `mode`
+   * was locked to "signup" for the whole session - so clicking "Log in" opened
+   * the Create Account form.
+   *
+   * React intentionally ignores prop changes in useState, so the state has to
+   * be re-synced explicitly. It re-syncs when:
+   *   - `initialMode` changes  -> a different button was clicked, and
+   *   - `isOpen` changes       -> the modal is (re)opened.
+   *
+   * It deliberately does NOT re-sync when the user switches forms with
+   * `switchMode()` inside the modal, because neither dependency changes then.
+   */
+  useEffect(() => {
+    setMode(initialMode);
+    setErrors({});
+  }, [initialMode, isOpen]);
 
   if (!isOpen) return null;
 
