@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
 import { Card, CardContent } from "./ui/card";
 import LoadingSpinner from "./loading-spinner";
@@ -11,7 +11,9 @@ import axiosInstance from "@/lib/axiosInstance";
 import {
   notifyIfMatching,
   seedExistingTweets,
-  consumePendingTweetId,
+  peekPendingTweetId,
+  clearPendingTweetId,
+  decideReveal,
   OPEN_TWEET_EVENT,
 } from "@/lib/tweetNotifications";
 import { useAuth } from "@/context/AuthContext";
@@ -102,19 +104,22 @@ const Feed = () => {
   const { user } = useAuth();
   const [loading, setloading] = useState(false);
   const [revealNotice, setRevealNotice] = useState("");
+  // Internship Feature 3 - becomes true once the first /post fetch has
+  // finished. Used to distinguish "tweet not rendered YET" (keep waiting)
+  // from "tweet really not in the feed" (show the notice).
+  const [hasLoaded, setHasLoaded] = useState(false);
 
   /**
    * Internship Feature 3 - scroll to a tweet and briefly highlight it.
    * `TweetCard` renders `id={`tweet-${tweet._id}`}`, so the tweet id is the
    * stable anchor. No routing is involved.
+   *
+   * Only called when `decideReveal` has already confirmed the element exists,
+   * so this cannot show a false "not in your feed" message.
    */
   const revealTweet = (tweetId: string) => {
     const element = document.getElementById(`tweet-${tweetId}`);
-    if (!element) {
-      setRevealNotice("That tweet is not in your feed right now.");
-      setTimeout(() => setRevealNotice(""), 4000);
-      return;
-    }
+    if (!element) return;
     element.scrollIntoView({ behavior: "smooth", block: "center" });
     element.classList.add("ring-2", "ring-blue-500", "bg-blue-900/10");
     setTimeout(() => {
@@ -135,35 +140,65 @@ const Feed = () => {
       console.error(error);
     } finally {
       setloading(false);
+      // Marks the first fetch as finished, successful or not. The reveal
+      // effect uses this to know when it is safe to report a missing tweet.
+      setHasLoaded(true);
     }
   };
   useEffect(() => {
     fetchTweets();
   }, []);
 
-  // Internship Feature 3 - handle "reveal this tweet" requests.
-  // Two paths cover every case:
-  //   a) the feed is already mounted -> the event fires immediately;
-  //   b) the user was on the Profile view -> Mainlayout switches to Home, this
-  //      feed mounts, and consumePendingTweetId() picks the target back up.
+  /**
+   * Internship Feature 3 - handle "reveal this tweet" requests.
+   *
+   * TIMING FIX: the pending tweet id is now only cleared once `decideReveal`
+   * says to. While the feed is still loading and the tweet has not rendered
+   * yet, the decision is "wait" and the id is KEPT, so the retry below can
+   * pick it up as soon as the tweets arrive. The "not in your feed" message
+   * is only shown after the first fetch has finished and the tweet is still
+   * genuinely absent. Two paths cover every case:
+   *   a) the feed is already mounted -> the event fires immediately;
+   *   b) the user was on the Profile view -> Mainlayout switches to Home, this
+   *      feed mounts, and the pending id survives until the tweets render.
+   */
+  const tryRevealPending = () => {
+    const decision = decideReveal(
+      peekPendingTweetId(),
+      hasLoaded,
+      (id) => Boolean(document.getElementById(`tweet-${id}`))
+    );
+
+    if (decision.action === "reveal") {
+      clearPendingTweetId();
+      revealTweet(decision.tweetId);
+    } else if (decision.action === "missing") {
+      clearPendingTweetId();
+      setRevealNotice("That tweet is not in your feed right now.");
+      setTimeout(() => setRevealNotice(""), 4000);
+    }
+    // "wait" and "idle" -> do nothing; the id is kept and retried below.
+  };
+
+  // Always points at the latest closure so the single long-lived listener
+  // never reads stale `tweets` or `hasLoaded` values.
+  const tryRevealPendingRef = useRef(tryRevealPending);
+  tryRevealPendingRef.current = tryRevealPending;
+
+  // ONE window listener for the component's lifetime - no duplicates, no
+  // re-registration on re-render.
   useEffect(() => {
-    const reveal = (event: Event) => {
-      const tweetId = (event as CustomEvent<{ tweetId?: string }>).detail?.tweetId;
-      if (tweetId) revealTweet(tweetId);
-    };
+    const onOpenTweet = () => tryRevealPendingRef.current();
+    window.addEventListener(OPEN_TWEET_EVENT, onOpenTweet);
+    return () => window.removeEventListener(OPEN_TWEET_EVENT, onOpenTweet);
+  }, []);
 
-    const revealPending = () => {
-      const tweetId = consumePendingTweetId();
-      if (tweetId) revealTweet(tweetId);
-    };
-
-    window.addEventListener(OPEN_TWEET_EVENT, reveal);
-    // Runs on mount (covers case b) and again whenever the list changes,
-    // because a newly loaded tweet may not have been in the DOM before.
-    revealPending();
-
-    return () => window.removeEventListener(OPEN_TWEET_EVENT, reveal);
-  }, [tweets]);
+  // Retry whenever the feed contents or the loading state change, so a
+  // notification click made while the feed was still loading is honoured as
+  // soon as the tweet renders.
+  useEffect(() => {
+    tryRevealPendingRef.current();
+  }, [tweets, hasLoaded]);
   const handlenewtweet = (newtweet: any) => {
     setTweets((prev: any) => [newtweet, ...prev]);
     // Internship Feature 3: this is the single place a genuinely NEW tweet

@@ -20,7 +20,10 @@ import {
   resetNotifiedTweets,
   hasNotified,
   setPendingTweetId,
+  peekPendingTweetId,
   consumePendingTweetId,
+  clearPendingTweetId,
+  decideReveal,
   getPendingTweetId,
   OPEN_TWEET_EVENT,
 } from "../src/lib/tweetNotifications.ts";
@@ -308,6 +311,57 @@ console.log("\n[11] CLICKING the notification reveals the tweet");
 
   g.window = originalWindow;
   g.Notification = originalNotification;
+console.log("\n[12] REVEAL TIMING - pending id is NOT lost while loading");
+{
+  // Simulates a tiny DOM: the only "rendered" tweets are the ids in this set.
+  const rendered = new Set<string>();
+  const exists = (id: string) => rendered.has(id);
+
+  // (a) Click while the tweet is already rendered -> reveal immediately.
+  setPendingTweetId("tweet-mounted");
+  rendered.add("tweet-mounted");
+  const mounted = decideReveal(peekPendingTweetId(), true, exists);
+  check("mounted feed reveals immediately", mounted.action === "reveal" && mounted.tweetId === "tweet-mounted");
+  clearPendingTweetId();
+  check("revealed id is cleared", peekPendingTweetId() === null);
+
+  // (b) Click from Profile before the tweets finish loading -> WAIT, keep id.
+  setPendingTweetId("tweet-slow");
+  const waiting = decideReveal(peekPendingTweetId(), false, exists);
+  check("loading feed waits instead of failing", waiting.action === "wait");
+  check("pending id is NOT lost during loading", peekPendingTweetId() === "tweet-slow");
+
+  // Same state, one more retry while still loading -> still kept, no notice.
+  const retryWhileLoading = decideReveal(peekPendingTweetId(), false, exists);
+  check("repeated retries while loading keep the id", retryWhileLoading.action === "wait" && peekPendingTweetId() === "tweet-slow");
+
+  // The tweets arrive and the anchor renders -> the very next retry reveals.
+  rendered.add("tweet-slow");
+  const landed = decideReveal(peekPendingTweetId(), true, exists);
+  check("tweet reveals once it renders", landed.action === "reveal" && landed.tweetId === "tweet-slow");
+  clearPendingTweetId();
+
+  // (c) Loading finished and the tweet really is missing -> report it.
+  setPendingTweetId("tweet-absent");
+  const missing = decideReveal(peekPendingTweetId(), true, exists);
+  check("missing tweet after load is reported", missing.action === "missing" && missing.tweetId === "tweet-absent");
+  clearPendingTweetId();
+
+  // (d) Nothing pending -> the retry effect is a cheap no-op.
+  const idle = decideReveal(peekPendingTweetId(), true, exists);
+  check("no pending id means idle", idle.action === "idle");
+}
+
+console.log("\n[13] PEEK vs CONSUME semantics");
+{
+  setPendingTweetId("tweet-peek");
+  check("peek reads without clearing", peekPendingTweetId() === "tweet-peek" && peekPendingTweetId() === "tweet-peek");
+  check("explicit clear forgets the id", (clearPendingTweetId(), peekPendingTweetId() === null));
+  setPendingTweetId("tweet-once");
+  check("consume still returns and clears", consumePendingTweetId() === "tweet-once" && consumePendingTweetId() === null);
+}
+
+
 }
 
 console.log(`\n==================================================`);

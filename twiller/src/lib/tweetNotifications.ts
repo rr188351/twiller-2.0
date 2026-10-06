@@ -137,6 +137,60 @@ export function getPendingTweetId(): string | null {
 }
 
 /**
+ * Non-destructive read of the pending tweet id.
+ *
+ * `Feed` uses this while the feed is still loading: it needs to know WHICH
+ * tweet is pending without losing it, because the matching DOM element does
+ * not exist yet. (The old code called `consumePendingTweetId()` eagerly, which
+ * discarded the id before the tweets had rendered - the notification-click
+ * timing bug.)
+ */
+export function peekPendingTweetId(): string | null {
+  return pendingTweetId;
+}
+
+/** Explicitly forgets the pending tweet id. */
+export function clearPendingTweetId(): void {
+  pendingTweetId = null;
+}
+
+/**
+ * Decision returned by `decideReveal`. Kept as a pure function so the timing
+ * rules can be unit-tested without React or a real DOM.
+ */
+export type RevealDecision =
+  | { action: "idle" }
+  | { action: "wait" }
+  | { action: "reveal"; tweetId: string }
+  | { action: "missing"; tweetId: string };
+
+/**
+ * Works out what to do about a pending "reveal this tweet" request.
+ *
+ * @param pendingId      the tweet the user clicked a notification for
+ * @param hasLoaded      whether the feed's first fetch has finished
+ * @param elementExists  checks the DOM for the tweet's anchor element
+ *
+ * Rules:
+ *   idle    - nothing pending.
+ *   reveal  - the tweet is on screen, so scroll to and highlight it.
+ *   wait    - the tweet is not on screen YET but the feed is still loading:
+ *             KEEP the id and try again once the tweets arrive.
+ *   missing - loading has finished and the tweet really is not in the feed:
+ *             only now is it safe to show the "not in your feed" message.
+ */
+export function decideReveal(
+  pendingId: string | null,
+  hasLoaded: boolean,
+  elementExists: (tweetId: string) => boolean
+): RevealDecision {
+  if (!pendingId) return { action: "idle" };
+  if (elementExists(pendingId)) return { action: "reveal", tweetId: pendingId };
+  if (!hasLoaded) return { action: "wait" };
+  return { action: "missing", tweetId: pendingId };
+}
+
+/**
  * The default click behaviour: focus the tab and ask the app to reveal the
  * tweet. Safe to call in a non-browser context (it simply does nothing).
  */
@@ -283,5 +337,12 @@ export default {
   seedExistingTweets,
   resetNotifiedTweets,
   hasNotified,
+  setPendingTweetId,
+  peekPendingTweetId,
+  consumePendingTweetId,
+  clearPendingTweetId,
+  decideReveal,
+  openTweet,
+  OPEN_TWEET_EVENT,
 };
 
