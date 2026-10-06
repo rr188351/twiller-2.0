@@ -21,6 +21,7 @@ import {
   fingerprintPassword,
 } from "./utils/passwordGenerator.js";
 import { getIstParts, getIstTimeString } from "./utils/istTime.js";
+import { getPlan, getCurrentPeriod } from "./utils/plans.js";
 dotenv.config();
 const app = express();
 app.use(cors());
@@ -94,9 +95,44 @@ app.patch("/userupdate/:email", async (req, res) => {
 });
 // Tweet API
 
+// ===========================================================================
+// INTERNSHIP FEATURE 1 (phase 1) - subscription quota guard.
+// Runs BEFORE the tweet is created. Resolves the author's plan from
+// backend/utils/plans.js (unknown/missing plans fall back to "free"),
+// counts tweets the author posted in the current IST month from the existing
+// timestamp field, and rejects (429) when the limit is already reached.
+// Gold is unlimited. Mongoose validation errors keep their existing 400.
+// ===========================================================================
+async function enforceTweetQuota(authorId) {
+  const author = await User.findById(authorId);
+  if (!author) return null; // let Mongoose validation report the missing author
+  const plan = getPlan(author.plan);
+  // Unlimited plans are never rejected - fall through to tweet creation.
+  if (plan.unlimited) return null;
+  const period = getCurrentPeriod();
+  const used = await Tweet.countDocuments({
+    author: author._id,
+    timestamp: { $gte: period.start, $lt: period.end },
+  });
+  if (used >= plan.tweetLimit) return { plan, used, limit: plan.tweetLimit };
+  return null;
+}
+
 // POST
 app.post("/post", async (req, res) => {
   try {
+    const quota = await enforceTweetQuota(req.body?.author);
+    if (quota) {
+      return res.status(429).send({
+        error: "Tweet limit reached. Upgrade your plan to post more.",
+        quotaExceeded: true,
+        plan: quota.plan.id,
+        planName: quota.plan.name,
+        tweetLimit: quota.limit,
+        used: quota.used,
+        periodLabel: getCurrentPeriod().label,
+      });
+    }
     const tweet = new Tweet(req.body);
     await tweet.save();
     return res.status(201).send(tweet);

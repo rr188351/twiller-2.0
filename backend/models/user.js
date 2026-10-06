@@ -12,6 +12,13 @@ const UserSchema = mongoose.Schema({
   // "cricket" and "science". Defaults to true so existing users keep the same
   // behaviour without needing to change anything.
   notificationsEnabled: { type: Boolean, default: true },
+  // Internship Feature 1 (phase 1) - subscription plan id, e.g. "free",
+  // "bronze", "silver" or "gold" as defined in backend/utils/plans.js.
+  // Optional with no stored value so that EVERY pre-existing document keeps
+  // working with no migration: lookups treat "no stored plan" as "free".
+  // Phase 2 will add richer subscription state (cycle, payment records); the
+  // plan id remains the only user-level field phase 1 needs.
+  plan: { type: String, default: undefined },
   bio: { type: String, default: "" },
   location: { type: String, default: "" },
   website: { type: String, default: "" },
