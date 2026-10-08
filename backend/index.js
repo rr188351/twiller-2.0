@@ -21,7 +21,16 @@ import {
   fingerprintPassword,
 } from "./utils/passwordGenerator.js";
 import { getIstParts, getIstTimeString } from "./utils/istTime.js";
-import { getPlan, getCurrentPeriod } from "./utils/plans.js";
+import { getPlan, getCurrentPeriod, PLANS } from "./utils/plans.js";
+import Subscription from "./models/subscription.js";
+import {
+  processPayment,
+  isPaymentWindowOpen,
+  millisUntilPaymentWindow,
+  paymentClock,
+  PAYMENT_WINDOW_START_HOUR,
+  PAYMENT_WINDOW_END_HOUR,
+} from "./utils/payment.js";
 dotenv.config();
 const app = express();
 app.use(cors());
@@ -136,6 +145,140 @@ app.post("/post", async (req, res) => {
     const tweet = new Tweet(req.body);
     await tweet.save();
     return res.status(201).send(tweet);
+  } catch (error) {
+    return res.status(400).send({ error: error.message });
+  }
+});
+// ===========================================================================
+// INTERNSHIP FEATURE 1 (phase 2) - mock subscription purchase.
+// POST /subscription/payment   { userId, planId, testOutcome?, asOf? }
+//
+// The backend MUST enforce, in this order:
+//   1. the user exists (same user-identification convention as the other
+//      routes: a client-supplied userId; see the security note below);
+//   2. the plan exists in backend/utils/plans.js - arbitrary strings are
+//      rejected and NEVER written to user.plan;
+//   3. "free" is not a paid purchase - no fake payment row is created;
+//   4. the 10:00-11:00 IST payment window, evaluated on the SERVER clock;
+//   5. the mock provider runs and the transaction row tracks every outcome.
+// On success only: the transaction becomes `success` and the user's plan is
+// updated, so the existing phase-1 quota guard picks the new limit up
+// automatically. On failure/cancellation the plan is left unchanged.
+//
+// SECURITY NOTE (known limitation, inherited from the existing project):
+// this codebase identifies callers by client-supplied ids today (no JWT,
+// Firebase Admin or trust-proxy). This route reuses that convention instead
+// of inventing a parallel auth system, and is written so a later Firebase
+// Admin check can be dropped into the `authenticatedUser` step below without
+// touching the purchase logic. Documented, not rewritten, in this phase.
+// ===========================================================================
+app.post("/subscription/payment", async (req, res) => {
+  try {
+    const { userId, planId, testOutcome, asOf } = req.body || {};
+
+    // 1. User must exist.
+    if (!userId) {
+      return res.status(400).send({ error: "userId is required." });
+    }
+    const authenticatedUser = await User.findById(userId);
+    if (!authenticatedUser) {
+      return res.status(404).send({ error: "User not found." });
+    }
+
+    // 2. Plan must be a real, PAID plan from the single source of truth.
+    // NOTE: `PLANS[planId]` is checked directly, NOT `getPlan()`, because
+    // getPlan() *falls back to free* for typos - which is right for the quota
+    // guard but wrong for a purchase (it would happily "sell" a typo).
+    const requestedId = typeof planId === "string" ? planId.toLowerCase() : "";
+    const requestedPlan = PLANS[requestedId];
+    if (!requestedPlan) {
+      return res.status(400).send({
+        error: `Unknown plan "${planId}". Available plans: bronze, silver, gold.`,
+        code: "UNKNOWN_PLAN",
+      });
+    }
+
+    // 3. Free is the default, not a paid transaction. No payment row, no
+    // mock approval, no plan change - an explicit, honest response instead.
+    if (requestedPlan.id === "free") {
+      return res.status(400).send({
+        error: 'The Free plan requires no payment. No transaction was created.',
+        code: "FREE_PLAN_NO_PAYMENT",
+        plan: authenticatedUser.plan || "free",
+      });
+    }
+
+    // 4. IST payment window, evaluated on server time. `asOf` is a TEST-ONLY
+    // override honoured only outside production; production always uses now.
+    let requestTime = new Date();
+    if (asOf && process.env.NODE_ENV !== "production") {
+      const parsed = new Date(asOf);
+      if (!Number.isNaN(parsed.getTime())) requestTime = parsed;
+    }
+    if (!isPaymentWindowOpen(requestTime)) {
+      return res.status(403).send({
+        error: "Payments are accepted only between 10:00 AM and 11:00 AM IST.",
+        code: "PAYMENT_WINDOW_CLOSED",
+        istTime: paymentClock(requestTime),
+        windowOpensInMs: millisUntilPaymentWindow(requestTime),
+      });
+    }
+
+    // 5. Record the attempt as pending BEFORE the provider runs.
+    const transaction = await Subscription.create({
+      user: authenticatedUser._id,
+      plan: requestedPlan.id,
+      amountInr: requestedPlan.priceInr,
+      status: "pending",
+      provider: "mock",
+    });
+
+    // 6. Charge through the replaceable provider abstraction. The window was
+    // already decided above, so only the outcome is mock-controllable.
+    const result = await processPayment({
+      plan: requestedPlan,
+      amountInr: requestedPlan.priceInr,
+      userId: String(authenticatedUser._id),
+      testOutcome,
+    });
+
+    if (!result.ok) {
+      // Failure/cancellation: the plan is left EXACTLY as it was.
+      transaction.status = result.status;
+      transaction.providerRef = result.providerRef;
+      await transaction.save();
+      return res.status(402).send({
+        error: result.failureReason || "Payment was not completed.",
+        code: `PAYMENT_${String(result.status).toUpperCase()}`,
+        provider: result.provider,
+        status: transaction.status,
+        plan: authenticatedUser.plan || "free",
+      });
+    }
+
+    // 7. Success: persist the new plan FIRST, and only then mark the
+    // transaction successful. If the user update throws, the row stays
+    // `pending` and the API reports the inconsistency - it NEVER claims a
+    // success the database does not reflect.
+    authenticatedUser.plan = requestedPlan.id;
+    await authenticatedUser.save();
+
+    transaction.status = "success";
+    transaction.providerRef = result.providerRef;
+    await transaction.save();
+
+    const periodLabel = getCurrentPeriod(requestTime).label;
+    return res.status(201).send({
+      ok: true,
+      status: "success",
+      provider: result.provider,
+      providerRef: result.providerRef,
+      plan: requestedPlan.id,
+      planName: requestedPlan.name,
+      amountInr: requestedPlan.priceInr,
+      transactionId: transaction._id,
+      periodLabel,
+    });
   } catch (error) {
     return res.status(400).send({ error: error.message });
   }
