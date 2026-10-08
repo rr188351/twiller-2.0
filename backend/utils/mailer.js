@@ -39,6 +39,19 @@ export function exposeDevCode() {
  * complete the flow without an email account.
  */
 function deliverViaConsole({ to, subject, body, kind }) {
+  // TEST-ONLY outage simulation, gated exactly like `testOutcome` in
+  // utils/payment.js: read at call time and honoured ONLY when NODE_ENV is
+  // not "production". It can only ever make delivery report failure - it can
+  // never fabricate a success. Lets feature1-invoice.test.js prove that a
+  // mailer failure never downgrades an already-successful payment.
+  if (exposeDevCode() && process.env.MOCK_MAIL_OUTAGE === "true") {
+    return {
+      delivered: false,
+      provider: "console",
+      error: "Simulated mail outage (MOCK_MAIL_OUTAGE=true)",
+    };
+  }
+
   // Never print the full identifier or the full secret in production.
   const maskedTo = process.env.NODE_ENV === "production" ? "[redacted]" : to;
   const secretLine = exposeDevCode() ? body : "[body hidden in production]";
@@ -119,8 +132,18 @@ export async function sendMail({ to, subject, body, kind = "generic", devCode })
   return result;
 }
 
-/** Sends the invoice / plan confirmation email (Internship Feature 1). */
-export function sendInvoiceEmail({ to, invoiceNumber, planName, amount, date }) {
+/** Sends the invoice / plan confirmation email (Internship Feature 1).
+ * Phase 3 extends the confirmation with the fields the assignment requires:
+ * payment/reference id, tweet quota (or "unlimited" for Gold) and plan
+ * details, all supplied by the caller from plans.js + the verified payment.
+ * Optional fields keep older callers working unchanged. No passwords, OTPs,
+ * tokens or other sensitive data may ever be passed in or printed here. */
+export function sendInvoiceEmail({ to, invoiceNumber, planName, amount, date, providerRef, tweetQuota }) {
+  const quotaLine =
+    tweetQuota === undefined || tweetQuota === null
+      ? []
+      : [`Tweet quota       : ${tweetQuota} tweets per month`, ``];
+  const refLine = providerRef ? [`Payment reference : ${providerRef}`, ``] : [];
   return sendMail({
     kind: "invoice",
     to,
@@ -128,13 +151,15 @@ export function sendInvoiceEmail({ to, invoiceNumber, planName, amount, date }) 
     body: [
       `Hello,`,
       ``,
-      `Thank you for your Twiller subscription.`,
+      `Your Twiller subscription payment was successful.`,
       ``,
       `Invoice number : ${invoiceNumber}`,
       `Plan            : ${planName}`,
       `Amount          : INR ${amount}`,
       `Date            : ${date}`,
       ``,
+      ...refLine,
+      ...quotaLine,
       `You can continue using your plan until the end of the billing period.`,
       ``,
       `- Twiller`,

@@ -31,6 +31,8 @@ import {
   PAYMENT_WINDOW_START_HOUR,
   PAYMENT_WINDOW_END_HOUR,
 } from "./utils/payment.js";
+import { createInvoice } from "./utils/invoice.js";
+import { sendInvoiceEmail } from "./utils/mailer.js";
 dotenv.config();
 const app = express();
 app.use(cors());
@@ -267,6 +269,46 @@ app.post("/subscription/payment", async (req, res) => {
     transaction.providerRef = result.providerRef;
     await transaction.save();
 
+    // 8. Phase 3: exactly one invoice per successful transaction. `createInvoice`
+    // is idempotent, so even if this block ever ran twice, MongoDB's unique
+    // index on `subscription` guarantees no duplicate row is created.
+    const { invoice } = await createInvoice({
+      userId: authenticatedUser._id,
+      subscriptionId: transaction._id,
+      plan: requestedPlan,
+      provider: result.provider,
+      providerRef: result.providerRef,
+      paidAt: transaction.updatedAt || new Date(),
+    });
+
+    // 9. Phase 3: invoice/plan confirmation through the EXISTING mock mailer
+    // abstraction (console in this environment; SMTP later with zero feature
+    // changes). Email outcome is recorded ON the invoice only: a mailer
+    // failure can never downgrade a successful payment, and the API reports
+    // the delivery status honestly instead of claiming "email sent".
+    const tweetQuota =
+      requestedPlan.unlimited === true
+        ? "unlimited"
+        : requestedPlan.tweetLimit;
+    let emailDelivery = "pending";
+    try {
+      const mailResult = await sendInvoiceEmail({
+        to: authenticatedUser.email,
+        invoiceNumber: invoice.invoiceNumber,
+        planName: requestedPlan.name,
+        amount: requestedPlan.priceInr,
+        date: getCurrentPeriod(requestTime).label,
+        providerRef: result.providerRef,
+        tweetQuota,
+      });
+      emailDelivery = mailResult && mailResult.delivered === true ? "sent" : "failed";
+    } catch (error) {
+      console.error("[invoice] confirmation email failed:", error?.message || "unknown error");
+      emailDelivery = "failed";
+    }
+    invoice.emailDelivery = emailDelivery;
+    await invoice.save();
+
     const periodLabel = getCurrentPeriod(requestTime).label;
     return res.status(201).send({
       ok: true,
@@ -278,6 +320,9 @@ app.post("/subscription/payment", async (req, res) => {
       amountInr: requestedPlan.priceInr,
       transactionId: transaction._id,
       periodLabel,
+      invoiceNumber: invoice.invoiceNumber,
+      invoiceStatus: invoice.status,
+      emailDelivery,
     });
   } catch (error) {
     return res.status(400).send({ error: error.message });
