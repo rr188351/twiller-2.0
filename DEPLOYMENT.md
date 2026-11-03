@@ -84,23 +84,39 @@ is no locale-to-channel mapping and no SMS/Twilio configuration.
 Set these on the backend service and then **redeploy** — environment variables are
 read when the process starts.
 
-**Email / SMTP (REQUIRED in production)**
-- `OTP_DELIVERY=smtp`
-- `SMTP_HOST`
-- `SMTP_PORT` (the repo example uses `465`)
-- `SMTP_SECURE` (`true` for implicit TLS on 465, `false` for 587 + STARTTLS)
-- `SMTP_USER`
-- `SMTP_PASS`
-- `MAIL_FROM` (e.g. `Twiller <no-reply@your-domain>`)
+> ⚠️ **Render Free web services block outbound SMTP (ports 25, 465 and 587).**
+> On the Free plan `smtp.gmail.com:465` can only time out — the provider is never
+> reached, so no SMTP port or credential change can fix it. Use the **HTTPS API**
+> transport below on Free. SMTP remains available for local development and paid
+> plans (`MAIL_PROVIDER=smtp`).
+
+**Email — RESEND over HTTPS (recommended / required on Render Free)**
+- `OTP_DELIVERY=smtp` (this is the "real delivery" switch; keep it)
+- `MAIL_PROVIDER=resend`
+- `RESEND_API_KEY` (secret — server-side only, never committed or logged)
+- `MAIL_FROM` — a sender **verified in Resend** (domain or single address)
+- optional `RESEND_TIMEOUT_MS` (default `15000`)
+
+**Email — SMTP (alternative; only where SMTP egress works)**
+- `MAIL_PROVIDER=smtp`
+- `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM`
+- optional `SMTP_PORT` / `SMTP_SECURE` — derived consistently when omitted
+  (`SMTP_SECURE=true` → 465 + TLS, otherwise 587 + STARTTLS)
 
 **Fail-closed behaviour — delivery is never faked**
-- `NODE_ENV=production` and the email provider is unset/`console` → the OTP
+- `NODE_ENV=production` and the mail provider is unset/`console` → the OTP
   endpoints answer **`502 delivery-failed`** (`provider: "unconfigured"` or
-  `"console"`) and the message names the missing `SMTP_*` variables.
-- `NODE_ENV=production`, `OTP_DELIVERY=smtp`, but a `SMTP_*` value is missing →
-  **`502 delivery-failed`** naming the missing variables.
-- The development console mock is **never** used in production, so an
-  unconfigured provider can no longer look like "the code was sent".
+  `"console"`) and the message names the missing variables.
+- A missing `RESEND_API_KEY` / `MAIL_FROM` (or SMTP equivalent) →
+  **`502 delivery-failed`** naming the variable, without contacting the network.
+- A provider rejection or a timeout is reported truthfully, with a redacted
+  reason (`provider` + `reason` in the response, `[mailer] …` in the logs).
+- The development console mock is **never** used in production.
+
+**Database**
+- `MONOGDB_URL` (the name the code reads; `MONGODB_URL` is accepted as a fallback)
+- optional `MONGODB_DB=twiller` to pin the database explicitly (see
+  `backend/utils/dbName.js`). Both `test` and `twiller` data are left untouched.
 
 **Database**
 - `MONOGDB_URL` (the name the code reads; `MONGODB_URL` is accepted as a fallback)
