@@ -22,16 +22,12 @@
  */
 
 import fs from "node:fs";
-import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   sendMail,
   resolveMailMode,
-  resolveMailProvider,
   missingSmtpEnv,
-  missingResendEnv,
-  missingMailEnv,
   SMTP_REQUIRED_ENV,
   smtpTransportOptions,
   redact,
@@ -78,42 +74,7 @@ async function withEnv(vars, fn) {
 /** The SMTP_* variables plus OTP_DELIVERY, all cleared. */
 function noSmtpEnv(extra = {}) {
   const cleared = Object.fromEntries(SMTP_REQUIRED_ENV.map((k) => [k, undefined]));
-  return {
-    ...cleared,
-    SMTP_PORT: undefined,
-    // Keep the provider deterministic for every section.
-    MAIL_PROVIDER: undefined,
-    RESEND_API_KEY: undefined,
-    RESEND_API_URL: undefined,
-    RESEND_TIMEOUT_MS: undefined,
-    ...extra,
-  };
-}
-
-/** Tiny HTTP stub standing in for the Resend REST API. */
-function startHttpStub(handler) {
-  return new Promise((resolve) => {
-    const server = http.createServer((req, res) => {
-      let body = "";
-      req.on("data", (c) => (body += c));
-      req.on("end", () => handler(req, res, body));
-    });
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      resolve({
-        base: `http://127.0.0.1:${port}`,
-        close: () =>
-          new Promise((r) => {
-            try {
-              server.closeAllConnections?.();
-            } catch {
-              /* older node */
-            }
-            server.close(() => r());
-          }),
-      });
-    });
-  });
+  return { ...cleared, SMTP_PORT: undefined, ...extra };
 }
 
 // The SMTP stub + closedPort helper live in tests/helpers/smtpStub.js so this
@@ -343,128 +304,6 @@ async function main() {
     check("the log names the MISSING variables instead", joined.includes("SMTP_HOST"), joined.slice(0, 300));
     check("redact() masks addresses and long secrets", !redact("x user@example.com y").includes("user@example.com") && !redact("token abcdefghijklmnopqrstuvwx").includes("abcdefghijklmnopqrstuvwx"));
   }
-
-  /* ---------------------------------------------------------------- */
-  console.log("\n[9] Resend HTTPS provider (works where Render blocks SMTP)");
-  await withEnv(
-    noSmtpEnv({ RESEND_API_KEY: "rk_test_dummy", MAIL_FROM: "Twiller <no-reply@twiller.test>" }),
-    async () => {
-      check("a RESEND_API_KEY switches the transport to resend", resolveMailProvider() === "resend");
-      check(
-        "resend needs no SMTP_* variable at all",
-        missingResendEnv().length === 0 && missingMailEnv().length === 0
-      );
-    }
-  );
-  await withEnv(
-    noSmtpEnv({ MAIL_PROVIDER: "smtp", RESEND_API_KEY: "rk_test_dummy" }),
-    async () => {
-      check("MAIL_PROVIDER=smtp still forces the SMTP transport", resolveMailProvider() === "smtp");
-    }
-  );
-
-  // --- successful send -------------------------------------------------
-  const okState = {};
-  const okStub = await startHttpStub((req, res, body) => {
-    okState.path = req.url;
-    okState.auth = req.headers.authorization || "";
-    okState.body = body;
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ id: "stub-message-id" }));
-  });
-  await withEnv(
-    noSmtpEnv({
-      OTP_DELIVERY: "smtp",
-      MAIL_PROVIDER: "resend",
-      NODE_ENV: "production",
-      RESEND_API_KEY: "rk_test_dummy",
-      RESEND_API_URL: okStub.base,
-      MAIL_FROM: "Twiller <no-reply@twiller.test>",
-    }),
-    async () => {
-      const r = await sendMail({ to: "user@twiller.test", subject: "Your code", body: "OTP-CODE-123456", devCode: "123456" });
-      check('resend acceptance -> delivered true, status "sent"', r.delivered === true && r.status === "sent", JSON.stringify(r));
-      check('provider is "resend"', r.provider === "resend", JSON.stringify(r));
-      check("PRODUCTION never echoes the devCode", !("devCode" in r), JSON.stringify(r));
-      let sent = null;
-      try {
-        sent = JSON.parse(okState.body);
-      } catch {
-        sent = null;
-      }
-      check(
-        "the provider received from/to/subject/text",
-        !!sent && sent.subject === "Your code" && Array.isArray(sent.to) && sent.to[0] === "user@twiller.test" && String(sent.text).includes("OTP-CODE-123456") && String(sent.from).includes("no-reply@twiller.test"),
-        okState.body
-      );
-      check("the API key is sent as a Bearer token, never in the body", /^Bearer\s+\S+$/.test(okState.auth) && !String(okState.body).includes("rk_test_dummy"));
-      check("the documented /emails endpoint is used", okState.path === "/emails", okState.path);
-    }
-  );
-  await okStub.close();
-
-  // --- provider rejection ---------------------------------------------
-  const badStub = await startHttpStub((req, res) => {
-    res.writeHead(422, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ statusCode: 422, name: "validation_error", message: "The twiller.test domain is not verified" }));
-  });
-  await withEnv(
-    noSmtpEnv({
-      OTP_DELIVERY: "smtp",
-      MAIL_PROVIDER: "resend",
-      NODE_ENV: "production",
-      RESEND_API_KEY: "rk_test_dummy",
-      RESEND_API_URL: badStub.base,
-      MAIL_FROM: "Twiller <no-reply@twiller.test>",
-    }),
-    async () => {
-      const r = await sendMail({ to: "user@twiller.test", subject: "s", body: "OTP-CODE-777777", devCode: "777777" });
-      check("provider rejection -> delivered false / failed", r.delivered === false && r.status === "failed", JSON.stringify(r));
-      check("the provider's own reason is surfaced", String(r.error).includes("not verified"), r.error);
-      check("the rejection leaks no OTP", !JSON.stringify(r).includes("OTP-CODE-777777"));
-    }
-  );
-  await badStub.close();
-
-  // --- timeout ---------------------------------------------------------
-  const hangStub = await startHttpStub(() => {
-    /* deliberately never responds */
-  });
-  const startedAt = Date.now();
-  await withEnv(
-    noSmtpEnv({
-      OTP_DELIVERY: "smtp",
-      MAIL_PROVIDER: "resend",
-      NODE_ENV: "production",
-      RESEND_API_KEY: "rk_test_dummy",
-      RESEND_API_URL: hangStub.base,
-      RESEND_TIMEOUT_MS: "300",
-      MAIL_FROM: "Twiller <no-reply@twiller.test>",
-    }),
-    async () => {
-      const r = await sendMail({ to: "user@twiller.test", subject: "s", body: "x" });
-      check("a hanging provider -> failed with a timeout error", r.delivered === false && /timed out/i.test(String(r.error)), JSON.stringify(r));
-      check("no devCode on a timeout", !("devCode" in r));
-    }
-  );
-  check("the request budget is enforced (returned well under 5s)", Date.now() - startedAt < 5000, `ms=${Date.now() - startedAt}`);
-  await hangStub.close();
-
-  // --- missing configuration ------------------------------------------
-  await withEnv(
-    noSmtpEnv({ OTP_DELIVERY: "smtp", MAIL_PROVIDER: "resend", NODE_ENV: "production", MAIL_FROM: "Twiller <x@twiller.test>" }),
-    async () => {
-      const r = await sendMail({ to: "user@twiller.test", subject: "s", body: "x" });
-      check('resend without RESEND_API_KEY -> failed, names the variable', r.delivered === false && String(r.error).includes("RESEND_API_KEY"), JSON.stringify(r));
-    }
-  );
-  await withEnv(
-    noSmtpEnv({ OTP_DELIVERY: "smtp", MAIL_PROVIDER: "resend", NODE_ENV: "production", RESEND_API_KEY: "rk_test_dummy" }),
-    async () => {
-      const r = await sendMail({ to: "user@twiller.test", subject: "s", body: "x" });
-      check('resend without MAIL_FROM -> failed, names MAIL_FROM', r.delivered === false && String(r.error).includes("MAIL_FROM"), JSON.stringify(r));
-    }
-  );
 
   console.log("\n==================================================");
   console.log(`  passed: ${passed}   failed: ${failed}`);

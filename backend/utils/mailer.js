@@ -36,29 +36,6 @@ export const SMTP_REQUIRED_ENV = ["SMTP_HOST", "SMTP_USER", "SMTP_PASS", "MAIL_F
 export const SMTP_DEFAULT_PORT = 587;
 export const SMTP_IMPLICIT_TLS_PORT = 465;
 
-/**
- * HTTPS transactional-email provider (Resend).
- *
- * WHY THIS EXISTS
- * ---------------
- * Render's Free web services BLOCK outbound SMTP (ports 25, 465 and 587), so
- * `smtp.gmail.com:465` can only ever time out there - the provider is never
- * reached and no SMTP port/credential fix can help. The provider's HTTPS API
- * runs on 443, which is never blocked, so this transport works on every Render
- * plan while keeping the exact same `sendMail()` interface for callers.
- *
- * Configuration:
- *   RESEND_API_KEY   secret API key (never committed, never logged)
- *   MAIL_FROM        a sender VERIFIED in Resend (domain or single address)
- *   MAIL_PROVIDER    "resend" | "smtp" (optional; inferred from the key)
- *   RESEND_API_URL   override for tests (local stub)
- *   RESEND_TIMEOUT_MS  request budget (default 15000) so a hang cannot stall
- *                      an OTP request
- */
-export const RESEND_REQUIRED_ENV = ["RESEND_API_KEY", "MAIL_FROM"];
-export const RESEND_DEFAULT_API_URL = "https://api.resend.com";
-export const RESEND_DEFAULT_TIMEOUT_MS = 15000;
-
 /** Configured sender address (call time, so tests can override it). */
 function mailFrom() {
   return process.env.MAIL_FROM || "Twiller <no-reply@twiller.local>";
@@ -146,50 +123,10 @@ function logDeliveryFailure(mode, error) {
  */
 export function resolveMailMode() {
   const explicit = (process.env.OTP_DELIVERY || "").trim().toLowerCase();
-  // "live" and "resend" are accepted aliases for "real delivery"; the actual
-  // transport is chosen by resolveMailProvider().
-  if (explicit === "smtp" || explicit === "live" || explicit === "resend") return "smtp";
+  if (explicit === "smtp") return "smtp";
   if (explicit === "console" || explicit === "mock") return "console";
   if (!explicit) return process.env.NODE_ENV === "production" ? "unconfigured" : "console";
   return "unsupported";
-}
-
-/**
- * Which real transport to use once delivery is switched on.
- *
- *   MAIL_PROVIDER=resend | smtp  -> explicit choice wins
- *   unset                        -> "resend" when RESEND_API_KEY is present,
- *                                   otherwise "smtp" (backwards compatible)
- *
- * This is why an existing deployment that only sets `OTP_DELIVERY=smtp` keeps
- * using SMTP until a RESEND_API_KEY is added, at which point it moves to the
- * HTTPS API with no other change.
- */
-export function resolveMailProvider() {
-  const explicit = (process.env.MAIL_PROVIDER || "").trim().toLowerCase();
-  if (explicit === "resend" || explicit === "smtp") return explicit;
-  return String(process.env.RESEND_API_KEY || "").trim() ? "resend" : "smtp";
-}
-
-/** Resend variables still missing (names only - never values). */
-export function missingResendEnv() {
-  return RESEND_REQUIRED_ENV.filter((key) => !String(process.env[key] || "").trim());
-}
-
-/** Variables the SELECTED provider cannot work without (names only). */
-export function missingMailEnv(provider = resolveMailProvider()) {
-  return provider === "resend" ? missingResendEnv() : missingSmtpEnv();
-}
-
-/** Resend API base; RESEND_API_URL lets tests point at a local stub. */
-function resendApiBase() {
-  return String(process.env.RESEND_API_URL || RESEND_DEFAULT_API_URL).replace(/\/+$/, "");
-}
-
-/** Bounded request budget so a hanging provider can never stall an OTP call. */
-function resendTimeoutMs() {
-  const raw = Number(String(process.env.RESEND_TIMEOUT_MS ?? "").trim());
-  return Number.isFinite(raw) && raw > 0 ? raw : RESEND_DEFAULT_TIMEOUT_MS;
 }
 
 /** SMTP variables still missing (names only - never values). */
@@ -295,75 +232,6 @@ async function deliverViaSmtp({ to, subject, body }) {
 }
 
 /**
- * Real HTTPS provider (Resend).
- *
- * Used instead of SMTP because Render's Free plan blocks outbound SMTP ports;
- * HTTPS/443 is always reachable. The response contract is identical to
- * `deliverViaSmtp` so no caller changes.
- */
-async function deliverViaResend({ to, subject, body }) {
-  const missing = missingResendEnv();
-  if (missing.length > 0) {
-    // Configuration fact only (variable NAMES) - never a credential value.
-    return {
-      delivered: false,
-      status: "failed",
-      provider: "resend",
-      error:
-        `Email delivery is not configured: ${missing.join(", ")} missing. ` +
-        `Set OTP_DELIVERY=smtp, MAIL_PROVIDER=resend and ${RESEND_REQUIRED_ENV.join(", ")} in the backend environment.`,
-    };
-  }
-
-  const timeoutMs = resendTimeoutMs();
-  try {
-    const res = await fetch(`${resendApiBase()}/emails`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ from: mailFrom(), to: [to], subject, text: body }),
-      // A bounded budget: a hanging provider must never stall the OTP request.
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-
-    const payload = await res.json().catch(() => null);
-    if (!res.ok) {
-      const detail = (payload && (payload.message || payload.error)) || `HTTP ${res.status}`;
-      console.error(`[mailer] resend rejected the message (${res.status}): ${redact(detail)}`);
-      return {
-        delivered: false,
-        status: "failed",
-        provider: "resend",
-        error: `Email provider rejected the message: ${redact(detail)}`,
-      };
-    }
-
-    return {
-      delivered: true,
-      status: "sent",
-      provider: "resend",
-      providerMessageId: payload && payload.id ? String(payload.id) : undefined,
-    };
-  } catch (error) {
-    const timedOut = error?.name === "AbortError" || error?.name === "TimeoutError";
-    const reason = timedOut
-      ? `request exceeded the ${timeoutMs}ms budget`
-      : redact(error?.message || "unknown error");
-    console.error(`[mailer] resend delivery failed (timeout=${timeoutMs}ms): ${reason}`);
-    return {
-      delivered: false,
-      status: "failed",
-      provider: "resend",
-      error: timedOut
-        ? `Email provider timed out after ${timeoutMs}ms`
-        : "Email transport error (provider unreachable).",
-    };
-  }
-}
-
-/**
  * Sends an email using the configured provider.
  *
  * @param {{to:string, subject:string, body:string, kind?:string, devCode?:string}} message
@@ -375,12 +243,7 @@ export async function sendMail({ to, subject, body, kind = "generic", devCode })
   let result;
 
   if (mode === "smtp") {
-    // Which real transport: MAIL_PROVIDER, or inferred from RESEND_API_KEY.
-    const provider = resolveMailProvider();
-    result =
-      provider === "resend"
-        ? await deliverViaResend({ to, subject, body })
-        : await deliverViaSmtp({ to, subject, body });
+    result = await deliverViaSmtp({ to, subject, body });
   } else if (mode === "console") {
     if (process.env.NODE_ENV === "production") {
       // Hard guard: the development mock must NEVER be used in production, even
@@ -391,9 +254,8 @@ export async function sendMail({ to, subject, body, kind = "generic", devCode })
         status: "failed",
         provider: "console",
         error:
-          `Mock email delivery is disabled in production. Set OTP_DELIVERY=smtp and either ` +
-          `${RESEND_REQUIRED_ENV.join(", ")} (HTTPS - required on Render Free, where SMTP is blocked) ` +
-          `or ${SMTP_REQUIRED_ENV.join(", ")}.`,
+          `Mock email delivery is disabled in production. Set OTP_DELIVERY=smtp and ` +
+          `${SMTP_REQUIRED_ENV.join(", ")}.`,
       };
     } else {
       result = deliverViaConsole({ to, subject, body, kind });
@@ -403,7 +265,7 @@ export async function sendMail({ to, subject, body, kind = "generic", devCode })
       delivered: false,
       status: "failed",
       provider: String(process.env.OTP_DELIVERY || ""),
-      error: `OTP_DELIVERY="${process.env.OTP_DELIVERY}" is not supported. Use "smtp" (or "resend"), or "console".`,
+      error: `OTP_DELIVERY="${process.env.OTP_DELIVERY}" is not supported. Use "smtp" or "console".`,
     };
   } else {
     // Production with nothing configured: fail safely instead of mocking.
@@ -412,9 +274,8 @@ export async function sendMail({ to, subject, body, kind = "generic", devCode })
       status: "failed",
       provider: "unconfigured",
       error:
-        `Email delivery is not configured. Set OTP_DELIVERY=smtp and either ` +
-        `${RESEND_REQUIRED_ENV.join(", ")} (HTTPS - required on Render Free, where SMTP is blocked) ` +
-        `or ${SMTP_REQUIRED_ENV.join(", ")}.`,
+        `Email delivery is not configured. Set OTP_DELIVERY=smtp and ` +
+        `${SMTP_REQUIRED_ENV.join(", ")}.`,
     };
   }
 
@@ -474,13 +335,13 @@ export const mailerConfig = {
     return resolveMailMode();
   },
   get provider() {
-    return resolveMailMode() === "smtp" ? resolveMailProvider() : "console";
+    return resolveMailMode() === "smtp" ? "smtp" : "console";
   },
   get from() {
     return mailFrom();
   },
   get missingEnv() {
-    return resolveMailMode() === "smtp" ? missingMailEnv() : [];
+    return resolveMailMode() === "smtp" ? missingSmtpEnv() : [];
   },
   get exposesDevCode() {
     return exposeDevCode();
@@ -493,10 +354,7 @@ export default {
   exposeDevCode,
   mailerConfig,
   resolveMailMode,
-  resolveMailProvider,
   missingSmtpEnv,
-  missingResendEnv,
-  missingMailEnv,
   smtpTransportOptions,
   redact,
 };
