@@ -23,8 +23,38 @@
  *    never be written to the log file.
  */
 
-const OTP_DELIVERY = (process.env.OTP_DELIVERY || "console").toLowerCase();
-const MAIL_FROM = process.env.MAIL_FROM || "Twiller <no-reply@twiller.local>";
+/** Env vars the real SMTP adapter requires (names only - never values). */
+export const SMTP_REQUIRED_ENV = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "MAIL_FROM"];
+
+/** Configured sender address (call time, so tests can override it). */
+function mailFrom() {
+  return process.env.MAIL_FROM || "Twiller <no-reply@twiller.local>";
+}
+
+/**
+ * Resolves which mail transport to use. Read at CALL time (like utils/sms.js)
+ * so tests and hosted environments can change it without a restart.
+ *
+ *   OTP_DELIVERY=smtp             -> real SMTP (nodemailer)
+ *   OTP_DELIVERY=console | mock   -> development console mock
+ *   unset in production           -> "unconfigured"  (fail closed)
+ *   unset outside production      -> console mock
+ *
+ * MIRRORS utils/sms.js: production NEVER silently falls back to the mock, so
+ * the API can never report a delivered OTP when no provider actually sent it.
+ */
+export function resolveMailMode() {
+  const explicit = (process.env.OTP_DELIVERY || "").trim().toLowerCase();
+  if (explicit === "smtp") return "smtp";
+  if (explicit === "console" || explicit === "mock") return "console";
+  if (!explicit) return process.env.NODE_ENV === "production" ? "unconfigured" : "console";
+  return "unsupported";
+}
+
+/** SMTP variables still missing (names only - never values). */
+export function missingSmtpEnv() {
+  return SMTP_REQUIRED_ENV.filter((key) => !String(process.env[key] || "").trim());
+}
 
 /**
  * Whether secret values may be surfaced to the caller.
@@ -83,6 +113,19 @@ function deliverViaConsole({ to, subject, body, kind }) {
  * import means the mock mode has zero install cost.
  */
 async function deliverViaSmtp({ to, subject, body }) {
+  const missing = missingSmtpEnv();
+  if (missing.length > 0) {
+    // Configuration fact only (variable NAMES) - never a credential value.
+    return {
+      delivered: false,
+      status: "failed",
+      provider: "smtp",
+      error:
+        `Email delivery is not configured: ${missing.join(", ")} missing. ` +
+        `Set OTP_DELIVERY=smtp and ${SMTP_REQUIRED_ENV.join(", ")} in the backend environment.`,
+    };
+  }
+
   let nodemailer;
   try {
     // Dynamic import so the mock provider works with no extra dependency.
@@ -105,7 +148,7 @@ async function deliverViaSmtp({ to, subject, body }) {
       },
     });
 
-    await transport.sendMail({ from: MAIL_FROM, to, subject, text: body });
+    await transport.sendMail({ from: mailFrom(), to, subject, text: body });
     return { delivered: true, status: "sent", provider: "smtp" };
   } catch (error) {
     // error.message could contain credentials, so keep it generic in logs.
@@ -122,10 +165,45 @@ async function deliverViaSmtp({ to, subject, body }) {
  *          `devCode` is present ONLY outside production.
  */
 export async function sendMail({ to, subject, body, kind = "generic", devCode }) {
-  const result =
-    OTP_DELIVERY === "smtp"
-      ? await deliverViaSmtp({ to, subject, body })
-      : deliverViaConsole({ to, subject, body, kind });
+  const mode = resolveMailMode();
+  let result;
+
+  if (mode === "smtp") {
+    result = await deliverViaSmtp({ to, subject, body });
+  } else if (mode === "console") {
+    if (process.env.NODE_ENV === "production") {
+      // Hard guard, mirroring utils/sms.js: the development mock must NEVER be
+      // used in production, even if an operator set OTP_DELIVERY=console. This
+      // is what stops the API reporting a delivered OTP when nothing was sent.
+      result = {
+        delivered: false,
+        status: "failed",
+        provider: "console",
+        error:
+          `Mock email delivery is disabled in production. Set OTP_DELIVERY=smtp and ` +
+          `${SMTP_REQUIRED_ENV.join(", ")}.`,
+      };
+    } else {
+      result = deliverViaConsole({ to, subject, body, kind });
+    }
+  } else if (mode === "unsupported") {
+    result = {
+      delivered: false,
+      status: "failed",
+      provider: String(process.env.OTP_DELIVERY || ""),
+      error: `OTP_DELIVERY="${process.env.OTP_DELIVERY}" is not supported. Use "smtp" or "console".`,
+    };
+  } else {
+    // Production with nothing configured: fail safely instead of mocking.
+    result = {
+      delivered: false,
+      status: "failed",
+      provider: "unconfigured",
+      error:
+        `Email delivery is not configured. Set OTP_DELIVERY=smtp and ` +
+        `${SMTP_REQUIRED_ENV.join(", ")}.`,
+    };
+  }
 
   // Never echo the secret back to the client in production.
   if (result.delivered && devCode && exposeDevCode()) {
@@ -170,10 +248,30 @@ export function sendInvoiceEmail({ to, invoiceNumber, planName, amount, date, pr
   });
 }
 
+/** Non-secret snapshot of the mail configuration (safe to log / show in a UI). */
 export const mailerConfig = {
-  provider: OTP_DELIVERY === "smtp" ? "smtp" : "console",
-  from: MAIL_FROM,
-  exposesDevCode: exposeDevCode(),
+  get mode() {
+    return resolveMailMode();
+  },
+  get provider() {
+    return resolveMailMode() === "smtp" ? "smtp" : "console";
+  },
+  get from() {
+    return mailFrom();
+  },
+  get missingEnv() {
+    return resolveMailMode() === "smtp" ? missingSmtpEnv() : [];
+  },
+  get exposesDevCode() {
+    return exposeDevCode();
+  },
 };
 
-export default { sendMail, sendInvoiceEmail, exposeDevCode, mailerConfig };
+export default {
+  sendMail,
+  sendInvoiceEmail,
+  exposeDevCode,
+  mailerConfig,
+  resolveMailMode,
+  missingSmtpEnv,
+};

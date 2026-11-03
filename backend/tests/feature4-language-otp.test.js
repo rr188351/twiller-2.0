@@ -22,6 +22,9 @@ import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import mongoose from "mongoose";
+// Local SMTP stub so the production email path can be tested end-to-end
+// without credentials and without sending real mail.
+import { startSmtpStub } from "./helpers/smtpStub.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const BACKEND_ROOT = path.join(here, "..");
@@ -503,16 +506,63 @@ async function sectionF() {
   check("F5 legacy forgot-password unaffected -> 200, no devHint leak change", r.status === 200 && r.body && r.body.ok === true, JSON.stringify(r));
   await sG.stop();
 
-  const sH = await spawnBackend(`twiller_langotp_h_${stamp}`, { map: {}, nodeEnv: "production" });
+  // Production email behaviour - two independent guarantees:
+  //   F6: with a real SMTP provider configured the code IS mailed and the API
+  //       answers 200 without ever echoing the code (local stub, no real mail).
+  //   F7: with NO provider configured the request FAILS SAFELY (502
+  //       delivery-failed) instead of reporting a mock "success".
+  const smtpStub = await startSmtpStub();
+
+  const sH = await spawnBackend(`twiller_langotp_h_${stamp}`, {
+    map: {},
+    nodeEnv: "production",
+    env: {
+      OTP_DELIVERY: "smtp",
+      SMTP_HOST: "127.0.0.1",
+      SMTP_PORT: String(smtpStub.port),
+      SMTP_SECURE: "false",
+      SMTP_USER: "stub-user",
+      SMTP_PASS: "stub-pass",
+      MAIL_FROM: "Twiller <no-reply@twiller.test>",
+    },
+  });
   const uH = await makeUser(sH, { uid: "uid-h" });
   const tokH = T("h-main");
   sH.setMap({ [tokH]: ident("uid-h", uH.email, true) });
   r = await sH.api("/auth/language/otp/request", { method: "POST", body: { targetLocale: "fr" }, token: tokH });
   const leaked = JSON.stringify(r.body || {});
-  check("F6a production response has NO devCode/devHint", r.status === 200 && !("devCode" in (r.body || {})) && !("devHint" in (r.body || {})), leaked.slice(0, 200));
+  check(
+    "F6a production + smtp -> 200 email channel, NO devCode/devHint",
+    r.status === 200 && r.body && r.body.channel === "email" && !("devCode" in (r.body || {})) && !("devHint" in (r.body || {})),
+    leaked.slice(0, 200)
+  );
   check("F6b production body has no 6-digit OTP", !/\b\d{6}\b/.test(leaked), leaked.slice(0, 200));
   check("F6c server log never prints OTP material", !/verification code is/i.test(sH.log()), sH.log().slice(-200));
+  check(
+    "F6d the code actually reached the mail provider",
+    smtpStub.state.messages.length === 1,
+    JSON.stringify(smtpStub.state.messages).slice(0, 200)
+  );
   await sH.stop();
+  await smtpStub.close();
+
+  const sH2 = await spawnBackend(`twiller_langotp_h2_${stamp}`, { map: {}, nodeEnv: "production" });
+  const uH2 = await makeUser(sH2, { uid: "uid-h2" });
+  const tokH2 = T("h2-main");
+  sH2.setMap({ [tokH2]: ident("uid-h2", uH2.email, true) });
+  r = await sH2.api("/auth/language/otp/request", { method: "POST", body: { targetLocale: "fr" }, token: tokH2 });
+  const leaked2 = JSON.stringify(r.body || {});
+  check(
+    "F7a production + unconfigured email -> 502 delivery-failed (never a mock success)",
+    r.status === 502 && r.body && r.body.code === "delivery-failed",
+    leaked2.slice(0, 200)
+  );
+  check(
+    "F7b failure body leaks no devCode/devHint/OTP",
+    !("devCode" in (r.body || {})) && !("devHint" in (r.body || {})) && !/\b\d{6}\b/.test(leaked2),
+    leaked2.slice(0, 200)
+  );
+  await sH2.stop();
 }
 
 /* ===== G. concurrency: parallel resends single-flight (server sI) ===== */

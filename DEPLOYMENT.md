@@ -92,6 +92,43 @@ Until then only French can be verified for real. The mock is **disabled in
 production**, so an unconfigured production deploy fails safely with
 `502 delivery-failed` rather than reporting a message that was never sent.
 
+## 5. Provider configuration checklist (Render)
+
+Set these on the backend service and then **redeploy** — environment variables are
+read when the process starts.
+
+**SMS / Twilio** (required for `en`, `hi`, `es`, `pt`, `zh`)
+- `SMS_DELIVERY=twilio`
+- `SMS_ACCOUNT_SID`
+- `SMS_AUTH_TOKEN`
+- `SMS_FROM` (an E.164 Twilio sender number, e.g. `+1...`)
+- optional `SMS_DEFAULT_COUNTRY_CODE` (default `91`), applied to short local numbers
+
+**Email / SMTP** (required for `fr`)
+- `OTP_DELIVERY=smtp`
+- `SMTP_HOST`
+- `SMTP_PORT` (the repo example uses `465`)
+- `SMTP_SECURE` (`true` for implicit TLS on 465, `false` for 587 + STARTTLS)
+- `SMTP_USER`
+- `SMTP_PASS`
+- `MAIL_FROM` (e.g. `Twiller <no-reply@your-domain>`)
+
+**Fail-closed behaviour — delivery is never faked**
+- `NODE_ENV=production` and the email provider is unset/`console` → the email OTP
+  endpoint answers **`502 delivery-failed`** (`provider: "unconfigured"` or
+  `"console"`) and the message names the missing `SMTP_*` variables.
+- `NODE_ENV=production`, `OTP_DELIVERY=smtp`, but a `SMTP_*` value is missing →
+  **`502 delivery-failed`** naming the missing variables.
+- SMS locales with `SMS_DELIVERY` unset in production → **`502 delivery-failed`**
+  (`provider: "unconfigured"`) naming the Twilio variables.
+- The development console mock is **never** used in production, so an
+  unconfigured provider can no longer look like "the code was sent".
+
+**Database**
+- `MONOGDB_URL` (the name the code reads; `MONGODB_URL` is accepted as a fallback)
+- optional `MONGODB_DB=twiller` to pin the database explicitly (see
+  `backend/utils/dbName.js`). Both `test` and `twiller` data are left untouched.
+
 ## Notes / limitations
 
 - Audio uploads are restricted to **14:00–19:00 IST** by design;
