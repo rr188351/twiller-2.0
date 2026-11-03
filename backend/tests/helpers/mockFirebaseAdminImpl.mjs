@@ -33,6 +33,12 @@ const authService = {
     const out = { uid: entry.uid };
     if (entry.email !== undefined) out.email = entry.email;
     if (entry.email_verified !== undefined) out.email_verified = entry.email_verified;
+    // Mirror the `aud` / `iss` claims the real Firebase ID token carries.
+    // Tests that want cross-project rejection can override them via `aud` / `iss`.
+    if (entry.aud !== undefined) out.aud = entry.aud;
+    else out.aud = String(process.env.FIREBASE_PROJECT_ID || "twiller-bdc11");
+    if (entry.iss !== undefined) out.iss = entry.iss;
+    else out.iss = `https://securetoken.google.com/${out.aud}`;
     return out;
   },
 };
