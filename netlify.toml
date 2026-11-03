@@ -25,3 +25,6 @@
 
 [[plugins]]
   package = "@netlify/plugin-nextjs"
+[secrets_scanning]
+  omit_keys = ["NEXT_PUBLIC_BACKEND_URL"]
+  
