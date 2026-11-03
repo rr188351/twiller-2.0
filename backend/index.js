@@ -8,7 +8,6 @@ import PasswordReset from "./models/passwordreset.js";
 import LanguageOtp, { LANGUAGE_OTP_LOCALES } from "./models/languageotp.js";
 import AudioOtp from "./models/audiootp.js";
 import { sendMail, exposeDevCode } from "./utils/mailer.js";
-import { sendSms, toE164 } from "./utils/sms.js";
 // Selects the application database explicitly so an empty URI path can never
 // make the driver fall back to its default `test` database (see the module).
 import { resolveDatabaseName } from "./utils/dbName.js";
@@ -1162,7 +1161,7 @@ app.post("/retweet/:tweetid", requireFirebaseAuth, async (req, res) => {
 //   1. who is asking            -> find the Twiller user
 //   2. are they allowed to      -> maximum one request per day (enforced here,
 //      keep asking                  not in the browser)
-//   3. did they prove ownership  -> SMS OTP for the phone channel
+//   3. did they prove ownership  -> emailed OTP (email is the only channel)
 //   4. is the new password legal -> letters only, no digits, no symbols
 //
 // The actual password change is performed by Firebase from the browser, so no
@@ -1209,15 +1208,14 @@ function currentIstDay() {
  * STEP 1 - Request password recovery.
  * POST /auth/forgot-password/request   { identifier }
  *
- * `identifier` is either an email address or a phone number.
- * Email -> Firebase sends the reset code to that address.
- * Phone -> we send a 6-digit SMS OTP that must be verified first.
+ * `identifier` is the account's EMAIL address. A 6-digit code is emailed to it
+ * through utils/mailer.js; Firebase's reset link is requested afterwards.
  */
 app.post("/auth/forgot-password/request", async (req, res) => {
   try {
     const rawIdentifier = String(req.body.identifier || "").trim();
     if (!rawIdentifier) {
-      return res.status(400).send({ error: "Please enter your email address or phone number." });
+      return res.status(400).send({ error: "Please enter the email address on your account." });
     }
 
     // Anti-abuse: stop one IP from spamming this endpoint.
@@ -1228,16 +1226,18 @@ app.post("/auth/forgot-password/request", async (req, res) => {
       });
     }
 
-    const isEmail = rawIdentifier.includes("@");
-    const identifier = isEmail ? rawIdentifier.toLowerCase() : normalisePhone(rawIdentifier);
-
-    if (!isEmail && identifier.length < 10) {
-      return res.status(400).send({ error: "Please enter a valid phone number." });
+    // Password recovery is EMAIL ONLY. The mobile OTP channel has been removed,
+    // so a non-email identifier is rejected up front instead of falling back to
+    // a phone channel that no longer exists.
+    if (!rawIdentifier.includes("@")) {
+      return res.status(400).send({
+        error:
+          "Password recovery is email-based. Please enter the email address on your account.",
+        code: "email-required",
+      });
     }
-
-    const user = isEmail
-      ? await User.findOne({ email: identifier })
-      : await User.findOne({ phone: identifier });
+    const identifier = rawIdentifier.toLowerCase();
+    const user = await User.findOne({ email: identifier });
 
     // SECURITY - do not reveal whether an account exists. The response is
     // identical either way. In development only, `devHint` tells the
@@ -1271,29 +1271,11 @@ app.post("/auth/forgot-password/request", async (req, res) => {
       });
     }
 
-    const channel = isEmail ? "email" : "phone";
-
-    if (channel === "email") {
-      // Firebase performs the actual reset-email delivery from the browser
-      // (sendPasswordResetEmail). Here we only record the request so the daily
-      // limit is enforced server-side and the attempt is auditable.
-      await PasswordReset.create({
-        user: user._id,
-        identifier: user.email,
-        channel,
-        status: "pending",
-        dailyRequestDate: today,
-      });
-
-      return res.status(200).send({
-        ok: true,
-        channel,
-        message: `We have sent a password reset link to ${user.email}. Check your inbox.`,
-        expiresInMinutes: OTP_TTL_MINUTES,
-      });
-    }
-
-    // ---- PHONE CHANNEL: generate, hash and send a 6-digit OTP ----
+    // ---- EMAIL CHANNEL: generate, hash and email a 6-digit OTP ----
+    // The code goes to the address on the account through the same mailer used
+    // by every other OTP flow. Firebase's own reset link is requested by the
+    // browser only AFTER this code is verified, so the two proofs agree.
+    const channel = "email";
     const otp = generateOtp();
     const { hash, salt } = hashSecret(otp);
     const otpExpiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000);
@@ -1309,20 +1291,36 @@ app.post("/auth/forgot-password/request", async (req, res) => {
       otpExpiresAt,
     });
 
-    const result = await sendSms({
+    const result = await sendMail({
       kind: "password-reset-otp",
-      to: identifier,
+      to: user.email,
+      subject: "Your Twiller password reset code",
       body: `Your Twiller verification code is ${otp}. It expires in ${OTP_TTL_MINUTES} minutes. Do not share it with anyone.`,
       devCode: otp,
     });
 
+    if (!result.delivered) {
+      return res.status(502).send({
+        error: "The verification code could not be delivered. Please try again in a moment.",
+        code: "delivery-failed",
+        deliveryStatus: "failed",
+        provider: result.provider,
+        reason: result.error,
+      });
+    }
+
+    const isMock = result.status === "mock";
     return res.status(200).send({
       ok: true,
       channel,
-      message: `A ${OTP_TTL_MINUTES} minute verification code has been sent to your phone.`,
+      message: isMock
+        ? "Development mock: no real email was sent."
+        : `A ${OTP_TTL_MINUTES} minute verification code has been sent to ${user.email}.`,
       expiresInMinutes: OTP_TTL_MINUTES,
       delivered: result.delivered,
-      // devCode is attached by sendSms ONLY when NODE_ENV !== "production".
+      deliveryStatus: result.status,
+      provider: result.provider,
+      // devCode is attached by sendMail ONLY when NODE_ENV !== "production".
       ...(result.devCode ? { devCode: result.devCode } : {}),
     });
   } catch (error) {
@@ -1331,7 +1329,7 @@ app.post("/auth/forgot-password/request", async (req, res) => {
 });
 
 /**
- * STEP 2 - Verify the SMS OTP (phone channel only).
+ * STEP 2 - Verify the emailed OTP.
  * POST /auth/forgot-password/verify-otp   { identifier, otp }
  *
  * On success the server issues a short-lived, single-use recovery token that
@@ -1350,13 +1348,11 @@ app.post("/auth/forgot-password/verify-otp", async (req, res) => {
       return res.status(400).send({ error: "Please enter a valid 6-digit verification code." });
     }
 
-    const identifier = rawIdentifier.includes("@")
-      ? rawIdentifier.toLowerCase()
-      : normalisePhone(rawIdentifier);
+    const identifier = rawIdentifier.toLowerCase();
 
     const record = await PasswordReset.findOne({
       identifier,
-      channel: { $exists: true },
+      channel: "email",
       status: "pending",
     }).sort({ requestedAt: -1 });
 
@@ -1436,9 +1432,7 @@ app.post("/auth/forgot-password/complete", async (req, res) => {
       return res.status(400).send({ error: "Identifier is required." });
     }
 
-    const identifier = rawIdentifier.includes("@")
-      ? rawIdentifier.toLowerCase()
-      : normalisePhone(rawIdentifier);
+    const identifier = rawIdentifier.toLowerCase();
 
     const record = await PasswordReset.findOne({ identifier }).sort({ requestedAt: -1 });
 
@@ -1450,18 +1444,16 @@ app.post("/auth/forgot-password/complete", async (req, res) => {
       return res.status(409).send({ error: "This recovery request has already been used." });
     }
 
-    if (record.channel === "phone") {
-      // The phone channel MUST present a valid recovery token, which can only
-      // be obtained after a successful OTP verification.
-      if (record.status !== "verified" || !recoveryToken) {
-        return res.status(401).send({ error: "Please verify your phone code before resetting." });
-      }
-      if (record.recoveryExpiresAt && record.recoveryExpiresAt.getTime() < Date.now()) {
-        return res.status(410).send({ error: "Your verification session has expired. Please start again." });
-      }
-      if (!verifySecret(recoveryToken, record.recoveryTokenHash, record.recoveryTokenSalt)) {
-        return res.status(401).send({ error: "Invalid or expired recovery session. Please start again." });
-      }
+    // Every recovery request must present a valid, single-use recovery token,
+    // which can only be obtained after a successful email OTP verification.
+    if (record.status !== "verified" || !recoveryToken) {
+      return res.status(401).send({ error: "Please verify your email code before resetting." });
+    }
+    if (record.recoveryExpiresAt && record.recoveryExpiresAt.getTime() < Date.now()) {
+      return res.status(410).send({ error: "Your verification session has expired. Please start again." });
+    }
+    if (!verifySecret(recoveryToken, record.recoveryTokenHash, record.recoveryTokenSalt)) {
+      return res.status(401).send({ error: "Invalid or expired recovery session. Please start again." });
     }
 
     // ---- THE ASSIGNMENT RULE: letters only, no numbers, no symbols ----
@@ -1537,16 +1529,16 @@ app.get("/auth/forgot-password/history", async (req, res) => {
 // POST /auth/language/otp/request   { targetLocale }
 //   Requires verified Firebase token. Generates a 6-digit OTP, stores it
 //   in LanguageOtp collection (bound to the authenticated user + locale),
-//   sends it by email (for French) or SMS (for other locales), and returns
-//   a devCode in development mode.
+//   emails it to the account address, and returns a devCode in development
+//   mode.
 // POST /auth/language/otp/verify    { targetLocale, otp }
 //   Requires verified Firebase token. Validates the 6-digit OTP. On success,
 //   returns ok:true and marks the code as consumed (single-use). Wrong code
 //   returns 401. Expired code returns 410.
 //
-// --- Per-locale channel ---
-//   - French (fr): OTP delivered by email (devCode attached in dev mode)
-//   - All other locales (en, hi, es, pt, zh): OTP delivered by SMS
+// --- Channel ---
+//   Every locale (fr, en, hi, es, pt, zh) is delivered by EMAIL. The mobile
+//   (SMS) channel has been removed from the product.
 //
 // --- Security ---
 //   - Partial unique index (user + targetLocale while pending) guarantees at
@@ -1563,18 +1555,14 @@ const LANGUAGE_OTP_RESEND_COOLDOWN_SECONDS = Number(
 );
 
 /**
- * Verification channel per locale (assignment contract, see DEPLOYMENT.md):
- *   fr                    -> EMAIL
- *   en, hi, es, pt, zh    -> SMS
+ * Verification channel - EMAIL for every supported locale.
  *
- * Returning "email" for every locale applied the French-only "verified email"
- * rule to ALL languages, so POST /auth/language/otp/request answered
- * 403 email-unverified for any signed-in user whose email was not verified.
- * This restores the documented per-locale contract (the delivery branch below
- * already supports both channels).
+ * The mobile (SMS) OTP channel has been removed from the product, so there is
+ * locale-to-channel mapping: every locale (fr, en, hi, es, pt, zh) is delivered
+ * to the account's own email address through utils/mailer.js.
  */
-function languageOtpChannel(targetLocale) {
-  return targetLocale === "fr" ? "email" : "sms";
+function languageOtpChannel() {
+  return "email";
 }
 
 async function findUserForFirebaseUser(firebaseUser) {
@@ -1601,22 +1589,16 @@ app.post("/auth/language/otp/request", requireFirebaseAuth, async (req, res) => 
     const user = await findUserForFirebaseUser(req.firebaseUser);
     if (!user) return res.status(404).send({ error: "No Twiller profile exists for this account yet.", code: "no-profile" });
 
+    // Email is the ONLY channel: the code always goes to the account address.
     const channel = languageOtpChannel(targetLocale);
-    const destination = channel === "email" ? email : normalisePhone(user.phone);
+    const destination = email;
 
-    // French = EMAIL: a verified address is required before a code is sent.
-    // Other locales = SMS: a phone number must be on file on the profile.
-    if (channel === "email" && !emailVerified) {
+    // A verified address is required before a code is mailed out. Because email
+    // is now the only channel, this rule applies to every locale equally.
+    if (!emailVerified) {
       return res.status(403).send({
-        error: "Please verify your email address before switching to French.",
+        error: "Please verify your email address before switching languages.",
         code: "email-unverified",
-      });
-    }
-    if (channel === "sms" && destination.length < 7) {
-      return res.status(422).send({
-        error:
-          "No mobile number is on file. Please add one in your profile before switching languages.",
-        code: "phone-setup-required",
       });
     }
     const now = Date.now();
@@ -1635,9 +1617,13 @@ app.post("/auth/language/otp/request", requireFirebaseAuth, async (req, res) => 
     try {
       const record = await LanguageOtp.create({ user: user._id, firebaseUid: uid, email, channel, targetLocale, status: "pending", otpHash: hash, otpSalt: salt, otpExpiresAt: new Date(now + LANGUAGE_OTP_TTL_MINUTES * 60 * 1000), otpAttempts: 0, requestedAt: new Date(now), lastSentAt: new Date(now) });
       const body = `Your Twiller verification code is ${otp}. It expires in ${LANGUAGE_OTP_TTL_MINUTES} minutes. Do not share it with anyone.`;
-      const delivery = channel === "email"
-        ? await sendMail({ kind: "language-otp", to: destination, subject: "Your Twiller language verification code", body, devCode: otp })
-        : await sendSms({ kind: "language-otp", to: destination, body, devCode: otp });
+      const delivery = await sendMail({
+        kind: "language-otp",
+        to: destination,
+        subject: "Your Twiller language verification code",
+        body,
+        devCode: otp,
+      });
       if (!delivery.delivered) {
         record.status = "consumed";
         await record.save();
@@ -1651,16 +1637,15 @@ app.post("/auth/language/otp/request", requireFirebaseAuth, async (req, res) => 
         });
       }
       // Distinguish a REAL provider acceptance from the development mock so the
-      // UI can never present a mock as a delivered SMS.
+      // UI can never present a mock as a delivered email.
       const isMock = delivery.status === "mock";
-      const channelWord = channel === "email" ? "email" : "phone";
       return res.status(200).send({
         ok: true,
         channel,
         targetLocale,
         message: isMock
-          ? `Development mock: no real ${channel === "email" ? "email" : "SMS"} was sent.`
-          : `A ${LANGUAGE_OTP_TTL_MINUTES} minute verification code has been sent to your ${channelWord}.`,
+          ? "Development mock: no real email was sent."
+          : `A ${LANGUAGE_OTP_TTL_MINUTES} minute verification code has been sent to your email.`,
         expiresInMinutes: LANGUAGE_OTP_TTL_MINUTES,
         delivered: delivery.delivered,
         deliveryStatus: delivery.status,

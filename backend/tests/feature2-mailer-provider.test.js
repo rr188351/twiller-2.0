@@ -21,10 +21,16 @@
  * Exits 0 when everything passes, 1 on any failure. No framework added.
  */
 
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { sendMail, resolveMailMode, missingSmtpEnv, SMTP_REQUIRED_ENV } from "../utils/mailer.js";
 // Shared stub: the configured path runs against a local SMTP server, so no
 // real mail and no credentials are involved (see tests/helpers/smtpStub.js).
 import { startSmtpStub, closedPort } from "./helpers/smtpStub.js";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const BACKEND_ROOT = path.join(here, "..");
 
 let passed = 0;
 let failed = 0;
@@ -187,6 +193,40 @@ async function main() {
       );
     }
   );
+
+  /* ---------------------------------------------------------------- */
+  console.log("\n[6] The SMS/Twilio provider is gone from the backend");
+  const FORBIDDEN = [
+    "sendSms",
+    "resolveSmsMode",
+    "SMS_DELIVERY",
+    "SMS_ACCOUNT_SID",
+    "SMS_AUTH_TOKEN",
+    "SMS_FROM",
+    "SMS_DEFAULT_COUNTRY_CODE",
+    "twilio",
+    "Twilio",
+  ];
+  // Skip editor/backup leftovers (e.g. "index - Copy.js") - they are untracked
+  // scratch files, not part of the backend module graph.
+  const BACKUP = /( - Copy|\.bak|\.orig|\.original|\.new|\.tmp|\.clean)/i;
+  const walk = (dir) =>
+    fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      if (entry.name === "node_modules" || entry.name === "tests") return [];
+      if (BACKUP.test(entry.name)) return [];
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return walk(full);
+      return full.endsWith(".js") || full.endsWith(".mjs") ? [full] : [];
+    });
+  const offenders = [];
+  for (const file of walk(BACKEND_ROOT)) {
+    const src = fs.readFileSync(file, "utf8");
+    for (const needle of FORBIDDEN) {
+      if (src.includes(needle)) offenders.push(`${path.relative(BACKEND_ROOT, file)} -> ${needle}`);
+    }
+  }
+  check("no SMS/Twilio reference anywhere in backend source", offenders.length === 0, offenders.join(", "));
+  check("backend/utils/sms.js has been deleted", !fs.existsSync(path.join(BACKEND_ROOT, "utils", "sms.js")));
 
   console.log("\n==================================================");
   console.log(`  passed: ${passed}   failed: ${failed}`);

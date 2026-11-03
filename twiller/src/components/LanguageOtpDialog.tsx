@@ -10,24 +10,16 @@ import { Separator } from "./ui/separator";
 import LoadingSpinner from "./loading-spinner";
 import { useLanguage } from "@/context/LanguageContext";
 import { LOCALE_LABELS, type Locale } from "@/lib/i18n";
-import type { LanguageOtpChannel } from "@/lib/languageOtp";
 
 interface LanguageOtpDialogProps {
   isOpen: boolean;
   targetLocale: Locale;
-  channel: LanguageOtpChannel;
   devCode?: string;
-  /** Backend-reported dispatch result, so the dialog stays honest about mocks. */
-  deliveryStatus?: "sent" | "mock" | "failed";
   isRequesting: boolean;
   isVerifying: boolean;
   cooldownSeconds: number;
   error: string;
   attemptsRemaining: number | null;
-  /** Backend refused because the profile has no phone number on file. */
-  needsPhoneSetup?: boolean;
-  /** Takes the user to the profile editor so they can add a phone number. */
-  onFixPhone?: () => void;
   onVerify: (otp: string) => void;
   onResend: () => void;
   onClose: () => void;
@@ -155,7 +147,6 @@ export default function LanguageOtpDialog(props: LanguageOtpDialogProps) {
   const handleOtpChange = (value: string) => {
     setOtp(value.replace(/\D/g, "").slice(0, 6));
   };
-  const channel: LanguageOtpChannel = props.channel;
   return (
     <div
       className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
@@ -197,24 +188,8 @@ export default function LanguageOtpDialog(props: LanguageOtpDialogProps) {
           >
             {t("langOtp.intro", { language: LOCALE_LABELS[targetLocale] })}
           </p>
-          <p className="text-gray-400 text-sm">
-            {channel === "email" ? t("langOtp.hintEmail") : t("langOtp.hintSms")}
-          </p>
-          {/* Honest delivery status: a development mock is NEVER presented as a
-              real SMS, and a genuine provider acceptance is stated plainly. */}
-          {channel === "sms" && props.deliveryStatus === "mock" && (
-            <p
-              role="status"
-              className="text-xs text-amber-300 border border-amber-500/40 bg-amber-500/10 rounded-md px-2 py-1"
-            >
-              {t("sms.mockNotice")}
-            </p>
-          )}
-          {channel === "sms" && props.deliveryStatus === "sent" && !props.error && (
-            <p role="status" className="text-xs text-green-400">
-              {t("sms.realNotice")}
-            </p>
-          )}
+          {/* OTPs are always emailed to the account address. */}
+          <p className="text-gray-400 text-sm">{t("langOtp.hintEmail")}</p>
           <Separator className="bg-gray-700" />
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
@@ -237,18 +212,6 @@ export default function LanguageOtpDialog(props: LanguageOtpDialogProps) {
               <p className="text-red-400 text-sm" role="alert">
                 {localError || props.error}
               </p>
-            )}
-            {/* Not a dead end: when the profile has no phone number we offer a
-                direct route to the profile editor instead of only an error. */}
-            {props.needsPhoneSetup && props.onFixPhone && (
-              <Button
-                type="button"
-                onClick={props.onFixPhone}
-                disabled={busy}
-                className="w-full bg-blue-500 hover:bg-blue-600 disabled:bg-gray-700 disabled:text-gray-400 text-white font-semibold rounded-full"
-              >
-                {t("phone.addAction")}
-              </Button>
             )}
             {props.attemptsRemaining !== null && !localError && (
               <p className="text-gray-400 text-sm">
@@ -334,8 +297,6 @@ export function langOtpErrorMessage(
       return t("langOtp.errNoProfile");
     case "email-unverified":
       return t("langOtp.errEmailUnverified");
-    case "phone-setup-required":
-      return t("langOtp.errPhoneSetup");
     case "unsupported-locale":
       return t("langOtp.errUnsupportedLocale");
     case "invalid-code-shape":

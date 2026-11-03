@@ -68,7 +68,12 @@ async function register(username, email, phone, token) {
 }
 
 async function main() {
-  const server = await startTestServer({ fbMock: true });
+  // Force the console mailer: OTPs are emailed, and tests must never send real
+  // mail or depend on the developer's SMTP credentials.
+  const server = await startTestServer({
+    fbMock: true,
+    env: { OTP_DELIVERY: 'console', MOCK_MAIL_OUTAGE: 'false' },
+  });
   BASE = server.base;
   MONGO_URL = server.mongoUrl;
 
@@ -108,7 +113,7 @@ async function main() {
   check('first request succeeds (200)', r1.status === 200, 'got ' + r1.status);
   check('channel is email', r1.body?.channel === 'email');
   check('a user-facing message is returned', Boolean(r1.body?.message));
-  check('email channel issues NO code (Firebase emails the reset link)', !('devCode' in (r1.body || {})));
+  check('a 6-digit code is emailed for the email channel (dev mock)', /^\d{6}$/.test(r1.body?.devCode || ''), JSON.stringify(r1.body?.devCode));
 
   console.log('\\n[2] DAILY LIMIT - second request on the same IST day');
   const r2 = await api('/auth/forgot-password/request', { method: 'POST', body: { identifier: emailA } });
@@ -119,14 +124,14 @@ async function main() {
   check('email verify-otp refused (401 incorrect code)', r3.status === 401, 'got ' + r3.status);
   check('no recovery token is issued for the email channel', !r3.body?.recoveryToken);
 
-  console.log('\\n[4] PHONE channel - request recovery');
-  const phoneB = '9198' + String(stamp).slice(-7);
+  console.log('\\n[4] EMAIL channel - request recovery');
+  const phoneB = emailB; // email is the only OTP channel now
   const r4 = await api('/auth/forgot-password/request', { method: 'POST', body: { identifier: phoneB } });
   check('phone request succeeds (200)', r4.status === 200, 'got ' + r4.status);
-  check('phone channel is reported as "phone"', r4.body?.channel === 'phone', JSON.stringify(r4.body?.channel));
-  check('a 6-digit code is issued for the phone channel', /^\d{6}$/.test(r4.body?.devCode || ''), JSON.stringify(r4.body?.devCode));
+  check('the email channel is reported as "email"', r4.body?.channel === 'email', JSON.stringify(r4.body?.channel));
+  check('a 6-digit code is issued for the email channel', /^\d{6}$/.test(r4.body?.devCode || ''), JSON.stringify(r4.body?.devCode));
 
-  console.log('\\n[5] PHONE channel - verify OTP with correct code');
+  console.log('\\n[5] EMAIL channel - verify OTP with the correct code');
   const r5 = await api('/auth/forgot-password/verify-otp', { method: 'POST', body: { identifier: phoneB, otp: r4.body?.devCode } });
   check('phone verify-otp succeeds (200)', r5.status === 200, 'got ' + r5.status + ' ' + JSON.stringify(r5.body));
   check('verification reports ok', r5.body?.ok === true);
@@ -182,7 +187,7 @@ async function main() {
 
   console.log('\\n[13] EXPIRY - an expired OTP is refused by the server');
   if (MONGO_URL) {
-    const phoneD = '9197' + String(stamp).slice(-7);
+    const phoneD = emailD; // email is the only OTP channel now
     await register('fp_d_' + stamp, emailD, phoneD, tokenFor('d'));
     await api('/auth/forgot-password/request', { method: 'POST', body: { identifier: phoneD } });
     await PasswordReset.updateOne({ identifier: phoneD }, { otpExpiresAt: new Date(Date.now() - 60 * 1000) });

@@ -7,7 +7,7 @@
  * recorded so a test can assert what was actually transmitted.
  *
  * Shared by feature2-mailer-provider.test.js and feature4-language-otp.test.js
- * (the same idea as the Twilio HTTP stub in feature2-sms-provider.test.js).
+ * so both suites exercise the real send path without touching a network.
  */
 
 import net from "node:net";

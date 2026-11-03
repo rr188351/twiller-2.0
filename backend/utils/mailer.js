@@ -40,8 +40,8 @@ function mailFrom() {
  *   unset in production           -> "unconfigured"  (fail closed)
  *   unset outside production      -> console mock
  *
- * MIRRORS utils/sms.js: production NEVER silently falls back to the mock, so
- * the API can never report a delivered OTP when no provider actually sent it.
+ * Production NEVER silently falls back to the mock, so the API can never report
+ * a delivered OTP when no provider actually sent it.
  */
 export function resolveMailMode() {
   const explicit = (process.env.OTP_DELIVERY || "").trim().toLowerCase();
@@ -172,9 +172,9 @@ export async function sendMail({ to, subject, body, kind = "generic", devCode })
     result = await deliverViaSmtp({ to, subject, body });
   } else if (mode === "console") {
     if (process.env.NODE_ENV === "production") {
-      // Hard guard, mirroring utils/sms.js: the development mock must NEVER be
-      // used in production, even if an operator set OTP_DELIVERY=console. This
-      // is what stops the API reporting a delivered OTP when nothing was sent.
+      // Hard guard: the development mock must NEVER be used in production, even
+      // if an operator set OTP_DELIVERY=console. This is what stops the API
+      // reporting a delivered OTP when nothing was sent.
       result = {
         delivered: false,
         status: "failed",

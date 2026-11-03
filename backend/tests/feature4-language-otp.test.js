@@ -281,7 +281,7 @@ async function sectionA() {
   const tokNoPhone = T("a-nophone");
   s.setMap({ [tokNoPhone]: ident("uid-nophone", noPhone.email, true) });
   r = await s.api("/auth/language/otp/request", { method: "POST", body: { targetLocale: "hi" }, token: tokNoPhone });
-  check("A10 sms locale + no stored phone -> 422 phone-setup-required", r.status === 422 && r.body && r.body.code === "phone-setup-required", JSON.stringify(r));
+  check("A10 no phone on file is fine - email is the only channel -> 200", r.status === 200 && r.body && r.body.channel === "email", JSON.stringify(r));
 
   await s.stop();
 }
@@ -301,15 +301,15 @@ async function sectionB() {
   s.setMap({ [tok]: ident("uid-b", u.email, true), [tokCase]: ident("uid-b-case", uCase.email, true) });
 
   let r = await s.api("/auth/language/otp/request", { method: "POST", body: { targetLocale: "en" }, token: tok });
-  check("B1 en -> sms + 6-digit devCode", r.status === 200 && r.body && r.body.channel === "sms" && OTP_RE.test(r.body.devCode || ""), JSON.stringify(r));
+  check("B1 en -> email + 6-digit devCode", r.status === 200 && r.body && r.body.channel === "email" && OTP_RE.test(r.body.devCode || ""), JSON.stringify(r));
 
   for (const loc of ["hi", "es", "pt", "zh"]) {
     r = await s.api("/auth/language/otp/request", { method: "POST", body: { targetLocale: loc }, token: tok });
-    check(`B2 ${loc} -> sms`, r.status === 200 && r.body && r.body.channel === "sms", JSON.stringify(r));
+    check(`B2 ${loc} -> email`, r.status === 200 && r.body && r.body.channel === "email", JSON.stringify(r));
   }
 
   r = await s.api("/auth/language/otp/request", { method: "POST", body: { targetLocale: "EN" }, token: tokCase });
-  check("B3 uppercase EN normalises to en -> 200 sms", r.status === 200 && r.body && r.body.channel === "sms" && r.body.targetLocale === "en" && OTP_RE.test(r.body.devCode || ""), JSON.stringify(r));
+  check("B3 uppercase EN normalises to en -> 200 email", r.status === 200 && r.body && r.body.channel === "email" && r.body.targetLocale === "en" && OTP_RE.test(r.body.devCode || ""), JSON.stringify(r));
 
   for (const bad of ["de", "xx", ""]) {
     r = await s.api("/auth/language/otp/request", { method: "POST", body: { targetLocale: bad }, token: tok });

@@ -18,7 +18,12 @@
 import axiosInstance from "./axiosInstance.js";
 import type { Locale } from "./i18n";
 
-export type LanguageOtpChannel = "email" | "sms";
+/**
+ * OTPs are delivered by EMAIL for every locale. The SMS/Twilio channel has been
+ * removed from the product, so this type has exactly one member and callers can
+ * no longer branch on a mobile channel.
+ */
+export type LanguageOtpChannel = "email";
 
 export interface LanguageOtpRequestSuccess {
   ok: true;
@@ -134,8 +139,8 @@ function toApiError(status: number, body: unknown): LanguageOtpApiError {
 
 /**
  * STEP 1 - ask the backend to issue (or resend) a code for `targetLocale`.
- * The backend decides the channel (fr -> email, others -> sms) and the
- * destination from the server-side record.
+ * Email is the only channel: the backend resolves the destination from the
+ * server-side account record.
  */
 export async function requestLanguageOtp(
   idToken: string,

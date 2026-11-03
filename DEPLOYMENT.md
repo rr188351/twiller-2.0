@@ -32,7 +32,7 @@ Function. It needs its own Node service.
      `FIREBASE_SERVICE_ACCOUNT_JSON` **or**
      `FIREBASE_SERVICE_ACCOUNT_PATH`/`GOOGLE_APPLICATION_CREDENTIALS`.
    - Recommended: `CORS_ORIGINS=https://<your-netlify-site>`,
-     `OTP_DELIVERY`, `PAYMENT_MODE`, `SMTP_*`, `SMS_*`, `OTP_TTL_MINUTES`, …
+     `OTP_DELIVERY`, `PAYMENT_MODE`, `SMTP_*`, `OTP_TTL_MINUTES`, …
 6. Verify: `GET /` → `Twiller backend is running successfully`;
    `GET /plans` → JSON plans; an authenticated route without a token → `401`.
 
@@ -61,50 +61,30 @@ Function. It needs its own Node service.
 - Image upload returns a `/uploads/images/...` URL that renders.
 - Audio upload (inside 14:00–19:00 IST) returns a `/uploads/...` URL that plays.
 - No browser console error mentions `localhost`.
+- Switching language sends an **email** OTP for every locale (check the inbox).
 
-## 4. Language-switch OTP — required configuration
+## 4. OTP delivery — EMAIL ONLY
 
-The assignment fixes the verification channel **per locale** (implemented in
-`backend/index.js` → `languageOtpChannel()`); this was deliberately left
-unchanged:
+Twiller sends **every** one-time code by email: language switching, sign-in
+verification and password recovery. The mobile/SMS channel has been removed from
+the product (`backend/utils/sms.js` and all `SMS_*` variables are gone), so there
+is no locale-to-channel mapping and no SMS/Twilio configuration.
 
-| Locale | Channel | Configured by |
-|---|---|---|
-| `fr` (French) | **email** OTP | `OTP_DELIVERY=smtp` + `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` |
-| `en`, `hi`, `es`, `pt`, `zh` | **SMS** OTP | `SMS_DELIVERY=twilio` + `SMS_ACCOUNT_SID`, `SMS_AUTH_TOKEN`, `SMS_FROM` |
+| Flow | Destination |
+|---|---|
+| Language switch (any locale: `fr`, `en`, `hi`, `es`, `pt`, `zh`) | the account's email address |
+| Chrome sign-in code | the account's email address |
+| Audio-upload code | the account's email address |
+| Password recovery | the account's email address (emailed OTP, then Firebase's reset email) |
 
-**Current state of this repo:** the five SMS locales run on the development
-**mock** — the code is printed to the backend console
-(`MOCK SMS (no SMS was sent)`), the API returns `deliveryStatus: "mock"`, and
-**no real SMS is sent**. This is a configuration gap, not a code defect: no
-`SMS_*` value is set in `backend/.env`.
-
-**Two prerequisites for the five SMS locales to work end-to-end**
-1. Set `SMS_DELIVERY=twilio` **plus** `SMS_ACCOUNT_SID`, `SMS_AUTH_TOKEN`,
-   `SMS_FROM` on the backend (server-side secrets — never `NEXT_PUBLIC_*`,
-   never committed), then restart the backend.
-2. The signed-in user must have a **phone number saved on their profile**,
-   otherwise `/auth/language/otp/request` answers `422 phone-setup-required`.
-   Optional: `SMS_DEFAULT_COUNTRY_CODE` (default `91`) is applied to short
-   local numbers before they are formatted to E.164.
-
-Until then only French can be verified for real. The mock is **disabled in
-production**, so an unconfigured production deploy fails safely with
-`502 delivery-failed` rather than reporting a message that was never sent.
+**No phone number is ever required** to send or verify a code.
 
 ## 5. Provider configuration checklist (Render)
 
 Set these on the backend service and then **redeploy** — environment variables are
 read when the process starts.
 
-**SMS / Twilio** (required for `en`, `hi`, `es`, `pt`, `zh`)
-- `SMS_DELIVERY=twilio`
-- `SMS_ACCOUNT_SID`
-- `SMS_AUTH_TOKEN`
-- `SMS_FROM` (an E.164 Twilio sender number, e.g. `+1...`)
-- optional `SMS_DEFAULT_COUNTRY_CODE` (default `91`), applied to short local numbers
-
-**Email / SMTP** (required for `fr`)
+**Email / SMTP (REQUIRED in production)**
 - `OTP_DELIVERY=smtp`
 - `SMTP_HOST`
 - `SMTP_PORT` (the repo example uses `465`)
@@ -114,13 +94,11 @@ read when the process starts.
 - `MAIL_FROM` (e.g. `Twiller <no-reply@your-domain>`)
 
 **Fail-closed behaviour — delivery is never faked**
-- `NODE_ENV=production` and the email provider is unset/`console` → the email OTP
-  endpoint answers **`502 delivery-failed`** (`provider: "unconfigured"` or
+- `NODE_ENV=production` and the email provider is unset/`console` → the OTP
+  endpoints answer **`502 delivery-failed`** (`provider: "unconfigured"` or
   `"console"`) and the message names the missing `SMTP_*` variables.
 - `NODE_ENV=production`, `OTP_DELIVERY=smtp`, but a `SMTP_*` value is missing →
   **`502 delivery-failed`** naming the missing variables.
-- SMS locales with `SMS_DELIVERY` unset in production → **`502 delivery-failed`**
-  (`provider: "unconfigured"`) naming the Twilio variables.
 - The development console mock is **never** used in production, so an
   unconfigured provider can no longer look like "the code was sent".
 

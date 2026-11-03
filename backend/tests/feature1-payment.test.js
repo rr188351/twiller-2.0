@@ -67,7 +67,12 @@ async function main() {
   // Secured routes need a verified token: boot the mock-Firebase backend and
   // give every fixture user its OWN token (uid + verified email), looked up by
   // user id / email so the rest of the suite keeps working unchanged.
-  const server = await startTestServer({ fbMock: true });
+  // Force the console mailer: this suite triggers invoice emails, and tests
+  // must never send real mail or depend on the developer's SMTP credentials.
+  const server = await startTestServer({
+    fbMock: true,
+    env: { OTP_DELIVERY: 'console', MOCK_MAIL_OUTAGE: 'false' },
+  });
   const BASE = server.base;
   let tokenMap = {};
   const tokenByUser = new Map();

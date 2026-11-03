@@ -21,14 +21,10 @@ import {
   requestLanguageOtp,
   verifyLanguageOtp,
   type LanguageOtpApiError,
-  type LanguageOtpChannel,
 } from "@/lib/languageOtp";
 import LanguageOtpDialog, {
   langOtpErrorMessage,
 } from "./LanguageOtpDialog";
-// Internship Feature 4 (phase 2) - lets the dialog send the user to the profile
-// editor (to add a phone number) without threading props through Mainlayout.
-import { OPEN_PROFILE_EDIT_EVENT } from "@/lib/profileEvents";
 
 /**
  * Language selector - Internship Feature 4 (phase 1).
@@ -47,23 +43,16 @@ export default function LanguageSelector({ compact = false }: { compact?: boolea
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [target, setTarget] = useState<Locale | null>(null);
-  const [channel, setChannel] = useState<LanguageOtpChannel>("sms");
   const [devCode, setDevCode] = useState<string | undefined>(undefined);
-  // "sent" | "mock" | "failed" as reported by the backend, so the dialog can be
-  // honest about whether a real SMS/e-mail actually went out.
-  const [deliveryStatus, setDeliveryStatus] = useState<"sent" | "mock" | "failed">("sent");
   const [isRequesting, setIsRequesting] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
   const [cooldownSeconds, setCooldownSeconds] = useState(0);
   const [dialogError, setDialogError] = useState("");
   const [attemptsRemaining, setAttemptsRemaining] = useState<number | null>(null);
-  // True when the backend refused because the profile has no phone number.
-  const [needsPhoneSetup, setNeedsPhoneSetup] = useState(false);
 
   const showError = useCallback(
     (err: LanguageOtpApiError | null) => {
       setDialogError(langOtpErrorMessage(t, err));
-      setNeedsPhoneSetup(err?.code === "phone-setup-required");
     },
     [t]
   );
@@ -74,13 +63,10 @@ export default function LanguageSelector({ compact = false }: { compact?: boolea
       try {
         const res = await requestLanguageOtp(idToken, next);
         if (res.ok) {
-          setChannel(res.data.channel);
           setDevCode(res.data.devCode);
-          setDeliveryStatus(res.data.deliveryStatus ?? "sent");
           setCooldownSeconds(0);
           setAttemptsRemaining(null);
           setDialogError("");
-          setNeedsPhoneSetup(false);
           setDialogOpen(true);
         } else {
           setCooldownSeconds(
@@ -206,25 +192,7 @@ export default function LanguageSelector({ compact = false }: { compact?: boolea
     setDialogError("");
     setAttemptsRemaining(null);
     setCooldownSeconds(0);
-    setNeedsPhoneSetup(false);
   }, [isRequesting, isVerifying]);
-
-  /**
-   * "Add phone number" action from the dialog: close it and ask the app to show
-   * the profile editor. Reuses the existing state-based navigation (no router).
-   */
-  const handleFixPhone = useCallback(() => {
-    setDialogOpen(false);
-    setTarget(null);
-    setDevCode(undefined);
-    setDialogError("");
-    setAttemptsRemaining(null);
-    setCooldownSeconds(0);
-    setNeedsPhoneSetup(false);
-    if (typeof window !== "undefined") {
-      window.dispatchEvent(new Event(OPEN_PROFILE_EDIT_EVENT));
-    }
-  }, []);
 
   return (
     <>
@@ -270,16 +238,12 @@ export default function LanguageSelector({ compact = false }: { compact?: boolea
         <LanguageOtpDialog
           isOpen={dialogOpen}
           targetLocale={target}
-          channel={channel}
           devCode={devCode}
-          deliveryStatus={deliveryStatus}
           isRequesting={isRequesting}
           isVerifying={isVerifying}
           cooldownSeconds={cooldownSeconds}
           error={dialogError}
           attemptsRemaining={attemptsRemaining}
-          needsPhoneSetup={needsPhoneSetup}
-          onFixPhone={handleFixPhone}
           onVerify={handleVerify}
           onResend={handleResend}
           onClose={handleClose}
