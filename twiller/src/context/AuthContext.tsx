@@ -8,6 +8,9 @@ import {
   signInWithPopup,
   sendEmailVerification,
   signOut,
+  // Aliased: the AuthContext exposes its own `updateProfile` (the backend PATCH),
+  // so Firebase's display-name updater must not collide with it.
+  updateProfile as updateFirebaseProfile,
 } from "firebase/auth";
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { auth } from "./firebase";
@@ -108,6 +111,19 @@ function toFriendlyAuthError(error: any): Error {
     return new Error("An account with that email already exists. Try signing in instead.");
   }
 
+  if (code === "auth/weak-password") {
+    return new Error(
+      "That password is too weak. Firebase requires at least 6 characters - please choose a longer password."
+    );
+  }
+
+  // The Email/Password provider is switched off for this Firebase project.
+  if (code === "auth/operation-not-allowed") {
+    return new Error(
+      "Email/password sign-up is disabled for this Firebase project. Enable the Email/Password provider in Firebase Console -> Authentication -> Sign-in method."
+    );
+  }
+
   if (code === "auth/too-many-requests") {
     return new Error("Too many attempts. Please wait a moment and try again.");
   }
@@ -152,10 +168,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             localStorage.setItem("twitter-user", JSON.stringify(res.data));
           }
         } catch (err: any) {
-          // A signed-in Firebase user may still need to verify their email
-          // before the backend will link an older Twiller profile. This 401 is
-          // expected until verification; don't spam the console with a stack.
-          if (err?.response?.data?.code === "email-unverified") {
+          // A signed-in Firebase user may still have no usable Twiller profile:
+          //   - "email-unverified": an older profile is waiting to be linked
+          //   - "no-profile":       no Twiller profile exists for this account yet
+          // Both are EXPECTED business states, not application errors. Handle
+          // them without a console stack trace and without fabricating a
+          // logged-in user (user stays null so the app shows the auth/landing
+          // screen and the user can complete registration).
+          const errCode = err?.response?.data?.code;
+          if (errCode === "email-unverified" || errCode === "no-profile") {
             setUser(null);
             localStorage.removeItem("twitter-user");
           } else {
@@ -249,6 +270,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         password
       );
       const user = usercred.user;
+      // Best-effort: mirror the chosen display name onto the Firebase account
+      // and send Firebase's verification email. Both are non-fatal - a failure
+      // here must NOT abort Twiller profile registration below. Sending the
+      // verification email at sign-up is what makes the French (email OTP)
+      // language switch possible later; login() can also resend it on demand.
+      try {
+        if (displayName && !user.displayName) {
+          await updateFirebaseProfile(user, { displayName });
+        }
+      } catch {
+        /* non-fatal: the Twiller profile keeps the display name anyway */
+      }
+      try {
+        await sendEmailVerification(user);
+      } catch {
+        /* non-fatal: the user can trigger another verification email from login */
+      }
       const newuser: any = {
         username,
         displayName,

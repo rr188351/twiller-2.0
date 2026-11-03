@@ -1548,8 +1548,19 @@ const LANGUAGE_OTP_RESEND_COOLDOWN_SECONDS = Number(
   process.env.LANGUAGE_OTP_RESEND_COOLDOWN_SECONDS || 60
 );
 
+/**
+ * Verification channel per locale (assignment contract, see DEPLOYMENT.md):
+ *   fr                    -> EMAIL
+ *   en, hi, es, pt, zh    -> SMS
+ *
+ * Returning "email" for every locale applied the French-only "verified email"
+ * rule to ALL languages, so POST /auth/language/otp/request answered
+ * 403 email-unverified for any signed-in user whose email was not verified.
+ * This restores the documented per-locale contract (the delivery branch below
+ * already supports both channels).
+ */
 function languageOtpChannel(targetLocale) {
-  return "email";
+  return targetLocale === "fr" ? "email" : "sms";
 }
 
 async function findUserForFirebaseUser(firebaseUser) {
@@ -1577,12 +1588,21 @@ app.post("/auth/language/otp/request", requireFirebaseAuth, async (req, res) => 
     if (!user) return res.status(404).send({ error: "No Twiller profile exists for this account yet.", code: "no-profile" });
 
     const channel = languageOtpChannel(targetLocale);
-    const destination = email;
+    const destination = channel === "email" ? email : normalisePhone(user.phone);
 
-    if (!emailVerified) {
+    // French = EMAIL: a verified address is required before a code is sent.
+    // Other locales = SMS: a phone number must be on file on the profile.
+    if (channel === "email" && !emailVerified) {
       return res.status(403).send({
-        error: "Please verify your email address before switching languages.",
+        error: "Please verify your email address before switching to French.",
         code: "email-unverified",
+      });
+    }
+    if (channel === "sms" && destination.length < 7) {
+      return res.status(422).send({
+        error:
+          "No mobile number is on file. Please add one in your profile before switching languages.",
+        code: "phone-setup-required",
       });
     }
     const now = Date.now();
