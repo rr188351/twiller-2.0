@@ -35,10 +35,12 @@ const check = (name, ok, detail = "") => {
   }
 };
 
-async function call(base, path, { method = "GET", body } = {}) {
+async function call(base, path, { method = "GET", body, token } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(`${base}${path}`, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
@@ -52,7 +54,9 @@ async function call(base, path, { method = "GET", body } = {}) {
 }
 
 async function main() {
-  const server = await startTestServer();
+  // Secured routes need a verified token, so boot the mock-Firebase backend.
+  // Each fixture user gets its own token (uid + verified email) in the map.
+  const server = await startTestServer({ fbMock: true });
   const BASE = server.base;
 
   console.log(`\nTwiller 2.0 - Feature 1 phase 1 (subscription quota) test suite`);
@@ -61,10 +65,21 @@ async function main() {
 
   const stamp = Date.now();
 
+  let tokenMap = {};
+  const tokenFor = (email, uid) => {
+    const token = `f1tok-${uid}`;
+    tokenMap[token] = { uid, email, email_verified: true };
+    server.setMap(tokenMap);
+    return token;
+  };
+
   const makeUser = async (tag, plan) => {
     const email = `f1.${tag}.${stamp}@twiller.test`;
+    const uid = `f1-uid-${tag}-${stamp}`;
+    const token = tokenFor(email, uid);
     const reg = await call(BASE, "/register", {
       method: "POST",
+      token,
       body: {
         username: `f1_${tag}_${stamp}`,
         displayName: `F1 ${tag}`,
@@ -76,24 +91,27 @@ async function main() {
     if (plan) {
       await call(BASE, `/userupdate/${encodeURIComponent(email)}`, {
         method: "PATCH",
+        token,
         body: { plan },
       });
     }
-    return reg.body;
+    // `token` travels with the user so every post/update call is signed.
+    return { ...reg.body, token };
   };
 
-  const post = (userId, i) =>
+  const post = (user, i) =>
     call(BASE, "/post", {
       method: "POST",
-      body: { author: userId, content: `quota tweet ${i} ${stamp}`, image: "" },
+      token: user.token,
+      body: { author: user._id, content: `quota tweet ${i} ${stamp}`, image: "" },
     });
 
-  const postUntilRejected = async (userId, maxAttempts = 9) => {
+  const postUntilRejected = async (user, maxAttempts = 9) => {
     let created = 0;
     let rejection = null;
     for (let i = 1; i <= maxAttempts; i += 1) {
       // eslint-disable-next-line no-await-in-loop
-      const res = await post(userId, i);
+      const res = await post(user, i);
       if (res.status === 201) {
         created += 1;
       } else {
@@ -106,10 +124,10 @@ async function main() {
 
   console.log("[1] new/existing users default to Free");
   const freeUser = await makeUser("free");
-  check("fresh user has no stored plan (behaves as Free)", freeUser?.plan === undefined, `plan=${JSON.stringify(freeUser?.plan)}`);
+  check("fresh user has no stored plan (behaves as Free)", freeUser?.plan === undefined || freeUser?.plan === "", `plan=${JSON.stringify(freeUser?.plan)}`);
 
   console.log("\n[2] Free: 1 tweet allowed, 2nd rejected in the same period");
-  const freeRun = await postUntilRejected(freeUser._id, 3);
+  const freeRun = await postUntilRejected(freeUser, 3);
   check("free user posts exactly 1 tweet", freeRun.created === 1, `created=${freeRun.created}`);
   check("2nd tweet rejected with 429", freeRun.rejection?.status === 429, `got ${freeRun.rejection?.status}`);
   check("rejection carries quotaExceeded flag", freeRun.rejection?.body?.quotaExceeded === true);
@@ -122,14 +140,14 @@ async function main() {
 
   console.log("\n[3] Bronze: 3 allowed, 4th rejected");
   const bronze = await makeUser("bronze", "bronze");
-  const bronzeRun = await postUntilRejected(bronze._id, 5);
+  const bronzeRun = await postUntilRejected(bronze, 5);
   check("bronze posts exactly 3 tweets", bronzeRun.created === 3, `created=${bronzeRun.created}`);
   check("4th tweet rejected with 429", bronzeRun.rejection?.status === 429);
   check("rejection names bronze with limit 3", bronzeRun.rejection?.body?.plan === "bronze" && bronzeRun.rejection?.body?.tweetLimit === 3);
 
   console.log("\n[4] Silver: 5 allowed, 6th rejected");
   const silver = await makeUser("silver", "silver");
-  const silverRun = await postUntilRejected(silver._id, 7);
+  const silverRun = await postUntilRejected(silver, 7);
   check("silver posts exactly 5 tweets", silverRun.created === 5, `created=${silverRun.created}`);
   check("6th tweet rejected with 429", silverRun.rejection?.status === 429);
   check("rejection names silver with limit 5", silverRun.rejection?.body?.plan === "silver" && silverRun.rejection?.body?.tweetLimit === 5);
@@ -139,7 +157,7 @@ async function main() {
   const goldRun = { created: 0, rejection: null };
   for (let i = 1; i <= 8; i += 1) {
     // eslint-disable-next-line no-await-in-loop
-    const res = await post(gold._id, i);
+    const res = await post(gold, i);
     if (res.status === 201) goldRun.created += 1;
     else {
       goldRun.rejection = res;
@@ -151,7 +169,7 @@ async function main() {
 
   console.log("\n[6] previous-period tweets do NOT consume the current quota");
   const rollover = await makeUser("rollover");
-  const first = await post(rollover._id, 1);
+  const first = await post(rollover, 1);
   check("first tweet of this month succeeds", first.status === 201);
   await mongoose.connect(server.mongoUrl);
   const lastMonth = new Date(first.body.timestamp);
@@ -160,25 +178,28 @@ async function main() {
     .collection("tweets")
     .updateOne({ _id: new mongoose.Types.ObjectId(first.body._id) }, { $set: { timestamp: lastMonth } });
   await mongoose.disconnect();
-  const after = await post(rollover._id, 2);
+  const after = await post(rollover, 2);
   check("free user can post again after last month expired", after.status === 201, `got ${after.status}`);
 
   console.log("\n[7] unknown plan id falls back to Free, never to unlimited");
   const odd = await makeUser("odd");
   await call(BASE, `/userupdate/${encodeURIComponent(odd.email)}`, {
     method: "PATCH",
+    token: odd.token,
     body: { plan: "not-a-real-plan" },
   });
-  const oddFirst = await post(odd._id, 1);
+  const oddFirst = await post(odd, 1);
   check("unknown plan allows 1 tweet like free", oddFirst.status === 201, `got ${oddFirst.status}`);
-  const oddSecond = await post(odd._id, 2);
+  const oddSecond = await post(odd, 2);
   check("unknown plan rejects 2nd tweet like free", oddSecond.status === 429, `got ${oddSecond.status}`);
 
   console.log("\n[8] existing tweet behavior unchanged");
   const feed = await call(BASE, "/post");
   check("GET /post still lists tweets", feed.status === 200 && Array.isArray(feed.body));
   check("author still populated", feed.body.length > 0 && typeof feed.body[0].author?.username === "string");
-  const bad = await call(BASE, "/post", { method: "POST", body: {} });
+  // Secured route: send a valid token (unlimited plan, so quota is not the
+  // limiter) and omit the required content -> the ORIGINAL validation 400.
+  const bad = await call(BASE, "/post", { method: "POST", token: gold.token, body: {} });
   check("missing author still rejected with validation 400", bad.status === 400, `got ${bad.status}`);
 
   // ---- clean up ONLY what this run created ---------------------------

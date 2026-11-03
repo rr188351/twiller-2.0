@@ -13,6 +13,9 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import axiosInstance from "@/lib/axiosInstance";
+// Internship Feature 5 - audio tweet playback. The stored reference
+// ("uploads/audio-1.wav") is resolved against the configured backend base.
+import { audioPlaybackUrl } from "@/lib/audioUpload";
 
 export default function TweetCard({ tweet }: any) {
   const { user } = useAuth();
@@ -113,6 +116,17 @@ export default function TweetCard({ tweet }: any) {
                   src={tweetstate.image}
                   alt="Tweet image"
                   className="w-full h-auto max-h-96 object-cover"
+                />
+              </div>
+            )}
+
+            {tweetstate.audioUrl && (
+              <div className="mb-3">
+                <audio
+                  controls
+                  preload="none"
+                  className="w-full"
+                  src={audioPlaybackUrl(tweetstate.audioUrl)}
                 />
               </div>
             )}

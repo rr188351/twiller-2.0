@@ -1,0 +1,27 @@
+# Netlify configuration - Twiller 2.0 frontend (Next.js).
+#
+# The Next.js app lives in the `twiller/` sub-directory, so Netlify must build
+# from there. The @netlify/plugin-nextjs runtime is required for App Router
+# features (SSR, route handlers, image optimisation) on Netlify.
+#
+# Environment variables (set in Netlify UI -> Site settings -> Environment
+# variables, NEVER committed here):
+#   NEXT_PUBLIC_BACKEND_URL
+#   NEXT_PUBLIC_FIREBASE_API_KEY
+#   NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+#   NEXT_PUBLIC_FIREBASE_PROJECT_ID
+#   NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+#   NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+#   NEXT_PUBLIC_FIREBASE_APP_ID
+
+[build]
+  base = "twiller"
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  # Next.js 15.5 requires Node >= 18.18. Pin a definitely-available LTS.
+  NODE_VERSION = "20.11.1"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"

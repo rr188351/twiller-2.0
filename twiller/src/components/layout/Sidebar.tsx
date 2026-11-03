@@ -11,7 +11,9 @@ import {
   User,
   MoreHorizontal,
   Settings,
-  LogOut
+  LogOut,
+  // Internship Feature 1 (phase 4) - subscription nav entry.
+  CreditCard
 } from 'lucide-react';
 import {
   DropdownMenu,
@@ -25,6 +27,9 @@ import { Button } from '../ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '../ui/avatar';
 import TwitterLogo from '../Twitterlogo';
 import { useAuth } from '@/context/AuthContext';
+// Internship Feature 4 (phase 1) - localized nav labels + language selector.
+import { useLanguage } from '@/context/LanguageContext';
+import LanguageSelector from '../LanguageSelector';
 
 interface SidebarProps {
   currentPage?: string;
@@ -33,15 +38,21 @@ interface SidebarProps {
 
 export default function Sidebar({ currentPage = 'home', onNavigate }: SidebarProps) {
   const { user, logout } = useAuth();
+  // Feature 4 - `t` re-renders every label instantly when the language
+  // changes; keys live in src/lib/i18n.ts.
+  const { t } = useLanguage();
 
   const navigation = [
-    { name: 'Home', icon: Home, current: currentPage === 'home', page: 'home' },
-    { name: 'Explore', icon: Search, current: currentPage === 'explore', page: 'explore' },
-    { name: 'Notifications', icon: Bell, current: currentPage === 'notifications', page: 'notifications', badge: true },
-    { name: 'Messages', icon: Mail, current: currentPage === 'messages', page: 'messages' },
-    { name: 'Bookmarks', icon: Bookmark, current: currentPage === 'bookmarks', page: 'bookmarks' },
-    { name: 'Profile', icon: User, current: currentPage === 'profile', page: 'profile' },
-    { name: 'More', icon: MoreHorizontal, current: currentPage === 'more', page: 'more' },
+    { name: t('nav.home'), icon: Home, current: currentPage === 'home', page: 'home' },
+    { name: t('nav.explore'), icon: Search, current: currentPage === 'explore', page: 'explore' },
+    { name: t('nav.notifications'), icon: Bell, current: currentPage === 'notifications', page: 'notifications', badge: true },
+    { name: t('nav.messages'), icon: Mail, current: currentPage === 'messages', page: 'messages' },
+    { name: t('nav.bookmarks'), icon: Bookmark, current: currentPage === 'bookmarks', page: 'bookmarks' },
+    { name: t('nav.profile'), icon: User, current: currentPage === 'profile', page: 'profile' },
+    // Internship Feature 1 (phase 4) - renders SubscriptionPage via the
+    // existing currentPage pattern in Mainlayout.
+    { name: t('nav.subscription'), icon: CreditCard, current: currentPage === 'subscription', page: 'subscription' },
+    { name: t('nav.more'), icon: MoreHorizontal, current: currentPage === 'more', page: 'more' },
   ];
 
   return (
@@ -75,8 +86,16 @@ export default function Sidebar({ currentPage = 'home', onNavigate }: SidebarPro
         
         <div className="mt-8 px-2">
           <Button className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 rounded-full text-lg">
-            Post
+            {t('common.post')}
           </Button>
+        </div>
+
+        {/* Internship Feature 4 (phase 1) - language selector for the
+            authenticated view. Same LanguageContext as Landing's selector,
+            so switching here updates the whole app instantly and persists
+            in localStorage. */}
+        <div className="mt-4 px-2">
+          <LanguageSelector compact />
         </div>
       </nav>
       
@@ -102,7 +121,7 @@ export default function Sidebar({ currentPage = 'home', onNavigate }: SidebarPro
             <DropdownMenuContent className="w-56 bg-black border-gray-800">
               <DropdownMenuItem className="text-white hover:bg-gray-900">
                 <Settings className="mr-2 h-4 w-4" />
-                Settings
+                {t('sidebar.settings')}
               </DropdownMenuItem>
               <DropdownMenuSeparator className="bg-gray-800" />
               <DropdownMenuItem 
@@ -110,7 +129,7 @@ export default function Sidebar({ currentPage = 'home', onNavigate }: SidebarPro
                 onClick={logout}
               >
                 <LogOut className="mr-2 h-4 w-4" />
-                Log out @{user.username}
+                {t('sidebar.logoutSuffix')} @{user.username}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

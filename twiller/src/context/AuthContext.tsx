@@ -6,11 +6,13 @@ import {
   onAuthStateChanged,
   signInWithEmailAndPassword,
   signInWithPopup,
+  sendEmailVerification,
   signOut,
 } from "firebase/auth";
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { auth } from "./firebase";
 import axiosInstance from "../lib/axiosInstance";
+import { describeAuthError } from "../lib/axiosInstance";
 
 interface User {
   _id: string;
@@ -25,6 +27,9 @@ interface User {
   // Internship features (optional on older profiles so nothing breaks).
   phone?: string;
   notificationsEnabled?: boolean;
+  // Internship Feature 1 (phase 4) - active subscription plan id. Optional
+  // with "free" fallback so older profiles keep working.
+  plan?: string;
 }
 
 interface AuthContextType {
@@ -42,10 +47,16 @@ interface AuthContextType {
     location: string;
     website: string;
     avatar: string;
+    // Internship Feature 4 (phase 2) - normalised phone number (digits only).
+    // Optional so callers that never touch the phone keep compiling.
+    phone?: string;
   }) => Promise<void>;
   logout: () => void;
   isLoading: boolean;
   googlesignin: () => void;
+  // Internship Feature 1 (phase 4) - refetch the server profile so the UI
+  // shows a newly activated plan without a full page reload.
+  refreshUser: () => Promise<void>;
 }
 
 /**
@@ -63,6 +74,16 @@ interface AuthContextType {
 function toFriendlyAuthError(error: any): Error {
   const rawMessage: string = error?.message || String(error || "");
   const code: string = error?.code || "";
+
+  // Secured backend routes answer with structured auth failures
+  // (401 auth-invalid / auth-unavailable / auth-conflict / email-unverified,
+  // 403 identity-mismatch, 503 auth-unavailable). Translate those first.
+  if (error && typeof error === "object" && "response" in error) {
+    const d = describeAuthError(error);
+    if (d.status && d.message) {
+      return new Error(d.message);
+    }
+  }
 
   if (rawMessage.startsWith("ACCOUNT_NO_TWILLER_PROFILE")) {
     return new Error(
@@ -118,20 +139,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // Check for existing session
+    // Check for existing session. The interceptor attaches the Firebase ID
+    // token, so the backend resolves the profile from the VERIFIED token
+    // (UID-first, verified-email fallback) - never from a client email param.
     const unsubcribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser?.email) {
         try {
-          const res = await axiosInstance.get("/loggedinuser", {
-            params: { email: firebaseUser.email },
-          });
+          const res = await axiosInstance.get("/loggedinuser");
 
           if (res.data) {
             setUser(res.data);
             localStorage.setItem("twitter-user", JSON.stringify(res.data));
           }
-        } catch (err) {
-          console.log("Failed to fetch user:", err);
+        } catch (err: any) {
+          // A signed-in Firebase user may still need to verify their email
+          // before the backend will link an older Twiller profile. This 401 is
+          // expected until verification; don't spam the console with a stack.
+          if (err?.response?.data?.code === "email-unverified") {
+            setUser(null);
+            localStorage.removeItem("twitter-user");
+          } else {
+            console.error("Failed to fetch user profile:", err);
+          }
         }
       } else {
         setUser(null);
@@ -160,10 +189,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     setIsLoading(true);
     try {
       const usercred = await signInWithEmailAndPassword(auth, email, password);
-      const firebaseuser = usercred.user;
-      const res = await axiosInstance.get("/loggedinuser", {
-        params: { email: firebaseuser.email },
-      });
+      // The axios interceptor attaches the freshly signed-in Firebase token,
+      // so the backend resolves this profile from the verified token. No
+      // client-supplied email is sent as identity.
+      const res = await axiosInstance.get("/loggedinuser");
       if (!res.data) {
         // Firebase accepted the credentials but Twiller has no profile for
         // this email. Without this the app would silently stay on the landing
@@ -175,6 +204,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       setUser(res.data);
       localStorage.setItem("twitter-user", JSON.stringify(res.data));
     } catch (error: any) {
+      // The backend deliberately refuses to link an unverified email to an
+      // existing MongoDB profile. Send Firebase's verification email instead
+      // of presenting this expected policy response as a generic login error.
+      const responseCode = error?.response?.data?.code;
+      if (responseCode === "email-unverified") {
+        const firebaseUser = auth.currentUser;
+        if (firebaseUser && !firebaseUser.emailVerified) {
+          try {
+            await sendEmailVerification(firebaseUser);
+            throw new Error(
+              "Your email is not verified yet. We sent a verification link to your inbox. Open that link, then sign in again. Check Spam/Junk if you don't see it."
+            );
+          } catch (verificationError: any) {
+            if (verificationError instanceof Error && verificationError.message.startsWith("Your email is not verified yet.")) {
+              throw verificationError;
+            }
+            if (verificationError?.code === "auth/too-many-requests") {
+              throw new Error("Firebase is temporarily limiting verification emails. Wait a few minutes and try again, or use the latest verification email already in your inbox.");
+            }
+            throw new Error("Your email is not verified. We couldn't send a verification email automatically. Use Firebase's verification email flow and try again after verifying your address.");
+          }
+        }
+      }
       throw toFriendlyAuthError(error);
     } finally {
       // ALWAYS clear the spinner, whatever happened.
@@ -221,12 +273,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     localStorage.removeItem("twitter-user");
   };
 
+  // Internship Feature 1 (phase 4) - refetch the profile using the EXISTING
+  // /loggedinuser pattern (same call login() and onAuthStateChanged use).
+  // Deliberately swallows failures: the caller already shows its own payment
+  // state, and a refresh must never freeze or break the page.
+  const refreshUser = async () => {
+    // The interceptor attaches the Firebase token; the backend resolves the
+    // profile from the verified token. No client email is sent as identity.
+    try {
+      const res = await axiosInstance.get("/loggedinuser");
+      if (res.data) {
+        setUser(res.data);
+        localStorage.setItem("twitter-user", JSON.stringify(res.data));
+      }
+    } catch (error) {
+      console.error("Failed to refresh user profile:", error);
+    }
+  };
+
   const updateProfile = async (profileData: {
     displayName: string;
     bio: string;
     location: string;
     website: string;
     avatar: string;
+    phone?: string;
   }) => {
     if (!user) return;
 
@@ -270,11 +341,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       let userData;
 
       try {
-        const res = await axiosInstance.get("/loggedinuser", {
-          params: { email: firebaseuser.email },
-        });
+        // Token attached by the interceptor; the backend resolves the profile
+        // from the verified token (UID-first, verified-email fallback).
+        const res = await axiosInstance.get("/loggedinuser");
         userData = res.data;
       } catch (err: any) {
+        // No profile yet (or unverified email on first link) - register.
+        // The token is attached by the interceptor; a verified Google email
+        // links/creates the profile safely, an unverified one is rejected
+        // by the backend with a clear "verify your email" error.
         const newuser: any = {
           username: firebaseuser.email.split("@")[0],
           displayName: firebaseuser.displayName || "User",
@@ -310,6 +385,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         logout,
         isLoading,
         googlesignin,
+        refreshUser,
       }}
     >
       {children}

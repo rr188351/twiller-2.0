@@ -14,7 +14,12 @@
  */
 
 import {
-  containsBothKeywords,
+  containsAnyKeyword,
+  recordNotification,
+  getNotificationRecords,
+  clearNotificationRecords,
+  resetNotificationLog,
+  isRecorded,
   notifyIfMatching,
   seedExistingTweets,
   resetNotifiedTweets,
@@ -63,24 +68,24 @@ const tweet = (id: string, content: string) => ({ _id: id, content });
 console.log("\nTwiller 2.0 - Feature 3 (browser notifications) test suite\n");
 
 // ------------------------------------------------------------------ matching
-console.log("[1] KEYWORD MATCHING - both words required, case-insensitive");
+console.log("[1] KEYWORD MATCHING - cricket OR science, case-insensitive");
 
 const shouldMatch: Array<[string, string]> = [
+  ["cricket only (OR)", "I love cricket so much"],
+  ["science only (OR)", "Science is fascinating"],
   ["contains both words", "Learning about cricket and science today"],
-  ["uppercase CRICKET + lowercase science", "CRICKET and science"],
+  ["uppercase CRICKET", "CRICKET is the best"],
+  ["uppercase SCIENCE", "SCIENCE rules"],
   ["lowercase cricket + uppercase SCIENCE", "cricket and SCIENCE"],
-  ["both fully uppercase", "CRICKET AND SCIENCE"],
   ["mixed title case", "Cricket And Science"],
-  ["extra words around them", "My thoughts on Cricket, Science and life"],
+  ["keyword with punctuation", "Cricket, anyone?"],
 ];
 
 for (const [label, content] of shouldMatch) {
-  check(label, containsBothKeywords(content), `for "${content}"`);
+  check(label, containsAnyKeyword(content), `for "${content}"`);
 }
 
 const shouldNotMatch: Array<[string, string]> = [
-  ["only cricket", "I love cricket so much"],
-  ["only science", "Science is fascinating"],
   ["neither word", "Just had a lovely afternoon walk"],
   ["empty string", ""],
   ["substring words do not trigger", "sciences and cricketers debated"],
@@ -88,13 +93,39 @@ const shouldNotMatch: Array<[string, string]> = [
 ];
 
 for (const [label, content] of shouldNotMatch) {
-  check(label, !containsBothKeywords(content), `for "${content}"`);
+  check(label, !containsAnyKeyword(content), `for "${content}"`);
 }
 
 check(
   "non-string input is handled safely",
-  containsBothKeywords(undefined as unknown as string) === false
+  containsAnyKeyword(undefined as unknown as string) === false
 );
+
+// ------------------------------------------------- notification LIST filtering
+console.log("\n[1b] NOTIFICATION LIST - only genuine matches, deduped");
+resetNotificationLog();
+check("list starts empty", getNotificationRecords().length === 0);
+check("neither-word tweet is NOT recorded", recordNotification(tweet("n1", "just a normal day")) === false);
+check("cricket-only tweet IS recorded", recordNotification(tweet("n2", "cricket practice today")) === true);
+check("science-only tweet IS recorded", recordNotification(tweet("n3", "science fair tomorrow")) === true);
+check("both-words tweet IS recorded", recordNotification(tweet("n4", "cricket and science club")) === true);
+check("duplicate tweet id is NOT recorded twice", recordNotification(tweet("n2", "cricket practice today")) === false);
+const recorded = getNotificationRecords();
+check("list holds exactly the 3 matches", recorded.length === 3, `len=${recorded.length}`);
+check("no non-matching tweet leaked into the list", recorded.every((r) => containsAnyKeyword(r.content)));
+check("record keeps the FULL tweet text", recorded.some((r) => r.content === "cricket and science club"));
+check("isRecorded reflects the store", isRecorded("n2") === true && isRecorded("n1") === false);
+check(
+  "seedExistingTweets records matches without duplicates",
+  (() => {
+    resetNotificationLog();
+    seedExistingTweets([tweet("s1", "cricket news"), tweet("s2", "weather report"), tweet("s1", "cricket news")]);
+    return getNotificationRecords().length === 1;
+  })()
+);
+clearNotificationRecords();
+check("clearNotificationRecords empties the list", getNotificationRecords().length === 0);
+resetNotificationLog();
 
 // ------------------------------------------------------------ notifications
 console.log("\n[2] NOTIFICATION DELIVERY - permission = granted");
@@ -112,11 +143,10 @@ resetNotifiedTweets();
   check("tag is derived from the tweet id", calls[0]?.tag === "twiller-tweet-t1");
 }
 
-console.log("\n[3] NO NOTIFICATION for partial matches");
+console.log("\n[3] OR RULE - a single keyword is enough; only unrelated tweets are ignored");
 for (const [label, content] of [
   ["only cricket", "cricket only"],
   ["only science", "science only"],
-  ["neither", "unrelated post"],
 ] as Array<[string, string]>) {
   resetNotifiedTweets();
   const { calls, notifier } = makeNotifier();
@@ -125,7 +155,18 @@ for (const [label, content] of [
     permission: "granted",
     notifier,
   });
-  check(`${label} does not notify`, !result.notified && result.reason === "no-keyword-match");
+  check(`${label} DOES notify (OR rule)`, result.notified && result.reason === "shown");
+  check(`${label} fired exactly one notification`, calls.length === 1, `got ${calls.length}`);
+}
+for (const [label, content] of [["neither word", "unrelated post"]] as Array<[string, string]>) {
+  resetNotifiedTweets();
+  const { calls, notifier } = makeNotifier();
+  const result = notifyIfMatching(tweet(`p-${label}`, content), {
+    enabled: true,
+    permission: "granted",
+    notifier,
+  });
+  check(`${label} does NOT notify`, !result.notified && result.reason === "no-keyword-match");
   check(`${label} fired no notification`, calls.length === 0);
 }
 

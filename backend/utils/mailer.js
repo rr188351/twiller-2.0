@@ -47,6 +47,7 @@ function deliverViaConsole({ to, subject, body, kind }) {
   if (exposeDevCode() && process.env.MOCK_MAIL_OUTAGE === "true") {
     return {
       delivered: false,
+      status: "failed",
       provider: "console",
       error: "Simulated mail outage (MOCK_MAIL_OUTAGE=true)",
     };
@@ -70,7 +71,9 @@ function deliverViaConsole({ to, subject, body, kind }) {
     ].join("\n")
   );
 
-  return { delivered: true, provider: "console" };
+  // `status` mirrors utils/sms.js so callers can distinguish a real provider
+  // acceptance ("sent") from a development mock ("mock").
+  return { delivered: true, status: "mock", provider: "console" };
 }
 
 /**
@@ -88,7 +91,7 @@ async function deliverViaSmtp({ to, subject, body }) {
     console.error(
       "[mailer] OTP_DELIVERY=smtp but 'nodemailer' is not installed. Run: npm install nodemailer"
     );
-    return { delivered: false, provider: "smtp", error: "nodemailer not installed" };
+    return { delivered: false, status: "failed", provider: "smtp", error: "nodemailer not installed" };
   }
 
   try {
@@ -103,11 +106,11 @@ async function deliverViaSmtp({ to, subject, body }) {
     });
 
     await transport.sendMail({ from: MAIL_FROM, to, subject, text: body });
-    return { delivered: true, provider: "smtp" };
+    return { delivered: true, status: "sent", provider: "smtp" };
   } catch (error) {
     // error.message could contain credentials, so keep it generic in logs.
     console.error("[mailer] SMTP delivery failed:", error?.message || "unknown error");
-    return { delivered: false, provider: "smtp", error: "SMTP delivery failed" };
+    return { delivered: false, status: "failed", provider: "smtp", error: "SMTP delivery failed" };
   }
 }
 

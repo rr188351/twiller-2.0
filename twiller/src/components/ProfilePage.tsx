@@ -11,6 +11,8 @@ import {
   Settings,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+// Internship Feature 4 (phase 1) - localized strings.
+import { useLanguage } from "@/context/LanguageContext";
 import { Button } from "./ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
@@ -19,7 +21,10 @@ import { Card, CardContent } from "./ui/card";
 import Editprofile from "./Editprofile";
 // Internship Feature 3 - enable/disable browser notifications from the profile.
 import NotificationSettings from "./NotificationSettings";
+// Internship Feature 2 - the user's own login history.
+import LoginHistory from "./LoginHistory";
 import axiosInstance from "@/lib/axiosInstance";
+import { OPEN_PROFILE_EDIT_EVENT } from "@/lib/profileEvents";
 
 interface Tweet {
   id: string;
@@ -104,10 +109,21 @@ export default function ProfilePage() {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState("posts");
   const [showEditModal, setShowEditModal] = useState(false);
+  const [tweets, setTweets] = useState<any>([]);
+  // Internship Feature 4 (phase 1).
+  const { t } = useLanguage();
+  const [loading, setloading] = useState(false);
+
+  // Internship Feature 4 (phase 2) - the language dialog's "Add phone number"
+  // action lands here and opens the edit modal. Declared BEFORE the early
+  // return below so the hook order stays identical on every render.
+  useEffect(() => {
+    const openEdit = () => setShowEditModal(true);
+    window.addEventListener(OPEN_PROFILE_EDIT_EVENT, openEdit);
+    return () => window.removeEventListener(OPEN_PROFILE_EDIT_EVENT, openEdit);
+  }, []);
 
   if (!user) return null;
-  const [tweets, setTweets] = useState<any>([]);
-  const [loading, setloading] = useState(false);
   const fetchTweets = async () => {
     try {
       setloading(true);
@@ -139,7 +155,7 @@ export default function ProfilePage() {
           </Button>
           <div>
             <h1 className="text-xl font-bold text-white">{user.displayName}</h1>
-            <p className="text-sm text-gray-400">{userTweets.length} posts</p>
+            <p className="text-sm text-gray-400">{userTweets.length} {t("profile.postsCountSuffix")}</p>
           </div>
         </div>
       </div>
@@ -182,7 +198,7 @@ export default function ProfilePage() {
             className="border-gray-600 text-white bg-gray-950 font-semibold rounded-full px-6"
             onClick={() => setShowEditModal(true)}
           >
-            Edit profile
+            {t("profile.editProfile")}
           </Button>
         </div>
       </div>
@@ -212,7 +228,7 @@ export default function ProfilePage() {
         <div className="flex items-center space-x-4 text-gray-400 text-sm mb-3">
           <div className="flex items-center space-x-1">
             <MapPin className="h-4 w-4" />
-            <span>{user.location ? user.location : "Earth"}</span>
+            <span>{user.location ? user.location : t("profile.defaultLocation")}</span>
           </div>
           <div className="flex items-center space-x-1">
             <LinkIcon className="h-4 w-4" />
@@ -223,7 +239,7 @@ export default function ProfilePage() {
           <div className="flex items-center space-x-1">
             <Calendar className="h-4 w-4" />
             <span>
-              Joined{" "}
+              {t("profile.joinedPrefix")}{" "}
               {user.joinedDate &&
                 new Date(user.joinedDate).toLocaleDateString("en-us", {
                   month: "long",
@@ -236,6 +252,8 @@ export default function ProfilePage() {
 
       {/* Internship Feature 3 - notification preference */}
       <NotificationSettings />
+      {/* Internship Feature 2 - who/where/when signed in. */}
+      <LoginHistory />
 
       {/* Tabs */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
@@ -244,31 +262,31 @@ export default function ProfilePage() {
             value="posts"
             className="data-[state=active]:bg-transparent data-[state=active]:text-white data-[state=active]:border-b-2 data-[state=active]:border-blue-500 data-[state=active]:rounded-none text-gray-400 hover:bg-gray-900/50 py-4 font-semibold"
           >
-            Posts
+            {t("profile.posts")}
           </TabsTrigger>
           <TabsTrigger
             value="replies"
             className="data-[state=active]:bg-transparent data-[state=active]:text-white data-[state=active]:border-b-2 data-[state=active]:border-blue-500 data-[state=active]:rounded-none text-gray-400 hover:bg-gray-900/50 py-4 font-semibold"
           >
-            Replies
+            {t("profile.replies")}
           </TabsTrigger>
           <TabsTrigger
             value="highlights"
             className="data-[state=active]:bg-transparent data-[state=active]:text-white data-[state=active]:border-b-2 data-[state=active]:border-blue-500 data-[state=active]:rounded-none text-gray-400 hover:bg-gray-900/50 py-4 font-semibold"
           >
-            Highlights
+            {t("profile.highlights")}
           </TabsTrigger>
           <TabsTrigger
             value="articles"
             className="data-[state=active]:bg-transparent data-[state=active]:text-white data-[state=active]:border-b-2 data-[state=active]:border-blue-500 data-[state=active]:rounded-none text-gray-400 hover:bg-gray-900/50 py-4 font-semibold"
           >
-            Articles
+            {t("profile.articles")}
           </TabsTrigger>
           <TabsTrigger
             value="media"
             className="data-[state=active]:bg-transparent data-[state=active]:text-white data-[state=active]:border-b-2 data-[state=active]:border-blue-500 data-[state=active]:rounded-none text-gray-400 hover:bg-gray-900/50 py-4 font-semibold"
           >
-            Media
+            {t("profile.media")}
           </TabsTrigger>
         </TabsList>
 
@@ -279,7 +297,7 @@ export default function ProfilePage() {
                 <CardContent className="py-12 text-center">
                   <div className="text-gray-400">
                     <h3 className="text-2xl font-bold mb-2">
-                      You haven't posted yet
+                      {t("profile.postsTabEmpty")}
                     </h3>
                     <p>When you post, it will show up here.</p>
                   </div>
@@ -298,7 +316,7 @@ export default function ProfilePage() {
             <CardContent className="py-12 text-center">
               <div className="text-gray-400">
                 <h3 className="text-2xl font-bold mb-2">
-                  You haven't replied yet
+                  {t("profile.repliesTabEmpty")}
                 </h3>
                 <p>When you reply to a post, it will show up here.</p>
               </div>
@@ -311,9 +329,9 @@ export default function ProfilePage() {
             <CardContent className="py-12 text-center">
               <div className="text-gray-400">
                 <h3 className="text-2xl font-bold mb-2">
-                  Lights, camera … attachments!
+                  {t("profile.mediaTabEmpty")}
                 </h3>
-                <p>When you post photos or videos, they will show up here.</p>
+                <p>{t("profile.mediaTabHint")}</p>
               </div>
             </CardContent>
           </Card>
@@ -324,7 +342,7 @@ export default function ProfilePage() {
             <CardContent className="py-12 text-center">
               <div className="text-gray-400">
                 <h3 className="text-2xl font-bold mb-2">
-                  You haven't written any articles
+                  {t("profile.articlesTabEmpty")}
                 </h3>
                 <p>When you write articles, they will show up here.</p>
               </div>
@@ -337,9 +355,9 @@ export default function ProfilePage() {
             <CardContent className="py-12 text-center">
               <div className="text-gray-400">
                 <h3 className="text-2xl font-bold mb-2">
-                  Lights, camera … attachments!
+                  {t("profile.mediaTabEmpty")}
                 </h3>
-                <p>When you post photos or videos, they will show up here.</p>
+                <p>{t("profile.mediaTabHint")}</p>
               </div>
             </CardContent>
           </Card>

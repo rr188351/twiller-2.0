@@ -40,23 +40,25 @@ export interface TweetLike {
 }
 
 /**
- * True when the text contains BOTH keywords, case-insensitively.
+ * True when the text contains EITHER keyword, case-insensitively.
  *
- * "Both" is deliberate: a tweet containing only one of them must not notify.
- * Word matching uses `\b` so "sciences" does not accidentally trigger, but
- * "Cricket", "SCIENCE" and "my CRICKET and Science thoughts" do.
+ * The assignment wording ("contains the word cricket and science") is
+ * interpreted as OR, exactly as the brief instructs: a tweet qualifies when it
+ * mentions cricket OR science. Word matching uses `\b` so "sciences" and
+ * "cricketers" do not accidentally trigger, while "Cricket", "SCIENCE" and
+ * "my CRICKET and Science thoughts" all do.
  */
-export function containsBothKeywords(content: string): boolean {
+export function containsAnyKeyword(content: string): boolean {
   if (typeof content !== "string" || content.length === 0) return false;
   const text = content.toLowerCase();
   return (
-    new RegExp(`\\b${ALERT_KEYWORD_A}\\b`).test(text) &&
+    new RegExp(`\\b${ALERT_KEYWORD_A}\\b`).test(text) ||
     new RegExp(`\\b${ALERT_KEYWORD_B}\\b`).test(text)
   );
 }
 
 /** Kept for readability at the call site. */
-export const tweetMatchesAlert = containsBothKeywords;
+export const tweetMatchesAlert = containsAnyKeyword;
 
 /**
  * Current permission state, or "unsupported" when the browser has no
@@ -223,6 +225,161 @@ export function hasNotified(tweetId: string): boolean {
 export function seedExistingTweets(tweets: TweetLike[]): void {
   for (const tweet of tweets) {
     if (tweet?._id) notifiedTweetIds.add(tweet._id);
+    // Qualifying tweets from the initial load also become NOTIFICATION LIST
+    // entries - the list must contain genuine matches only, never the whole
+    // feed. This records WITHOUT raising a native notification, so a refresh
+    // never re-notifies about old tweets.
+    try {
+      recordNotification(tweet);
+    } catch {
+      /* recording must never break the feed */
+    }
+  }
+}
+
+/* ===========================================================================
+ * NOTIFICATION LIST ("notification records")
+ * ---------------------------------------------------------------------------
+ * WHY A SEPARATE LIST
+ * -------------------
+ * The Notifications view must show ONLY tweets that actually matched the alert
+ * rule. Previously that view rendered the whole feed, so every ordinary tweet
+ * looked like a notification. This store keeps a deduped list of genuine
+ * matches, persisted per browser so it survives a reload.
+ *
+ * It never notifies on its own - the native Notification API is still fired
+ * only for genuinely NEW tweets (see notifyIfMatching), so historical matches
+ * recorded from the first feed load never pop up.
+ * =========================================================================== */
+export interface NotificationRecord {
+  tweetId: string;
+  authorName: string;
+  /** The FULL tweet text, as the assignment requires. */
+  content: string;
+  /** When this device recorded the match (ISO). */
+  recordedAt: string;
+  /** The tweet's own timestamp when the API provided one (ISO). */
+  tweetTimestamp?: string;
+}
+
+const NOTIFICATION_LOG_KEY = "twiller-notification-log";
+const MAX_RECORDS = 100;
+
+let notificationLog: NotificationRecord[] = [];
+let logLoaded = false;
+let logListeners: Array<() => void> = [];
+
+function loadLog(): void {
+  if (logLoaded) return;
+  logLoaded = true;
+  try {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    const raw = window.localStorage.getItem(NOTIFICATION_LOG_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(parsed)) {
+      notificationLog = parsed.filter(
+        (r): r is NotificationRecord =>
+          !!r && typeof r.tweetId === "string" && typeof r.content === "string"
+      );
+    }
+  } catch {
+    notificationLog = [];
+  }
+}
+
+function persistLog(): void {
+  try {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    window.localStorage.setItem(
+      NOTIFICATION_LOG_KEY,
+      JSON.stringify(notificationLog.slice(0, MAX_RECORDS))
+    );
+  } catch {
+    /* private mode / quota - the in-memory list still works */
+  }
+}
+
+function emitLogChange(): void {
+  for (const listener of logListeners) {
+    try {
+      listener();
+    } catch {
+      /* a bad subscriber must not break the store */
+    }
+  }
+}
+
+/** Subscribe to list changes (used by the Notifications view). */
+export function subscribeNotificationLog(listener: () => void): () => void {
+  logListeners.push(listener);
+  return () => {
+    logListeners = logListeners.filter((fn) => fn !== listener);
+  };
+}
+
+/** Newest-first copy of the notification records. */
+export function getNotificationRecords(): NotificationRecord[] {
+  loadLog();
+  return notificationLog.slice();
+}
+
+/** How many genuine matches are recorded. */
+export function getNotificationCount(): number {
+  loadLog();
+  return notificationLog.length;
+}
+
+/** True when this tweet is already in the notification list. */
+export function isRecorded(tweetId: string): boolean {
+  loadLog();
+  return notificationLog.some((r) => r.tweetId === tweetId);
+}
+
+/**
+ * Adds a tweet to the notification list. Returns false when the tweet does not
+ * qualify or is already recorded (so the list can never contain duplicates or
+ * non-matching tweets).
+ */
+export function recordNotification(tweet: TweetLike, authorName?: string): boolean {
+  loadLog();
+  if (!tweet?._id || !containsAnyKeyword(tweet.content)) return false;
+  if (notificationLog.some((r) => r.tweetId === tweet._id)) return false;
+
+  notificationLog.unshift({
+    tweetId: tweet._id,
+    authorName:
+      authorName || tweet.author?.displayName || tweet.author?.username || "Someone",
+    content: tweet.content,
+    recordedAt: new Date().toISOString(),
+    tweetTimestamp: (tweet as { timestamp?: string }).timestamp,
+  });
+  if (notificationLog.length > MAX_RECORDS) {
+    notificationLog = notificationLog.slice(0, MAX_RECORDS);
+  }
+  persistLog();
+  emitLogChange();
+  return true;
+}
+
+/** Empties the notification list (the user's explicit "Clear all"). */
+export function clearNotificationRecords(): void {
+  loadLog();
+  if (notificationLog.length === 0) return;
+  notificationLog = [];
+  persistLog();
+  emitLogChange();
+}
+
+/** Test helper - drops the in-memory list AND the persisted copy. */
+export function resetNotificationLog(): void {
+  notificationLog = [];
+  logLoaded = true;
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      window.localStorage.removeItem(NOTIFICATION_LOG_KEY);
+    }
+  } catch {
+    /* ignore */
   }
 }
 
@@ -280,8 +437,8 @@ export function notifyIfMatching(
     return { notified: false, reason: "missing-id" };
   }
 
-  // 5. The rule itself: BOTH keywords must be present in the same tweet.
-  if (!containsBothKeywords(tweet.content)) {
+  // 5. The rule itself: the tweet must contain cricket OR science.
+  if (!containsAnyKeyword(tweet.content)) {
     return { notified: false, reason: "no-keyword-match" };
   }
 
@@ -291,7 +448,7 @@ export function notifyIfMatching(
   }
 
   const authorName = tweet.author?.displayName || tweet.author?.username || "Someone";
-  const title = `${authorName} posted about cricket and science`;
+  const title = `${authorName} posted about cricket or science`;
   // The FULL tweet text is used, as the assignment requires.
   const body = tweet.content;
 
@@ -319,6 +476,13 @@ export function notifyIfMatching(
   try {
     show(title, { body, tag: `twiller-tweet-${tweet._id}` });
     notifiedTweetIds.add(tweet._id);
+    // Also record it in the notification LIST so the Notifications view can
+    // show only genuine matches (never the whole feed).
+    try {
+      recordNotification(tweet, authorName);
+    } catch {
+      /* list recording must never break the notification itself */
+    }
     return { notified: true, reason: "shown" };
   } catch {
     // A blocked or broken Notification constructor must not break the feed.
@@ -329,12 +493,19 @@ export function notifyIfMatching(
 export default {
   ALERT_KEYWORD_A,
   ALERT_KEYWORD_B,
-  containsBothKeywords,
+  containsAnyKeyword,
   tweetMatchesAlert,
   getPermissionState,
   requestNotificationPermission,
   notifyIfMatching,
   seedExistingTweets,
+  recordNotification,
+  getNotificationRecords,
+  getNotificationCount,
+  isRecorded,
+  clearNotificationRecords,
+  resetNotificationLog,
+  subscribeNotificationLog,
   resetNotifiedTweets,
   hasNotified,
   setPendingTweetId,

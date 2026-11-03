@@ -18,11 +18,32 @@ const UserSchema = mongoose.Schema({
   // working with no migration: lookups treat "no stored plan" as "free".
   // Phase 2 will add richer subscription state (cycle, payment records); the
   // plan id remains the only user-level field phase 1 needs.
-  plan: { type: String, default: undefined },
+  plan: { type: String, default: "" },
   bio: { type: String, default: "" },
   location: { type: String, default: "" },
   website: { type: String, default: "" },
   joinedDate: { type: Date, default: Date.now() },
+  // Firebase identity mapping (secure auth integration).
+  //
+  // Both fields are OPTIONAL with empty-string defaults so that EVERY
+  // pre-existing user document keeps working with no data migration:
+  // legacy records simply carry "" (no Firebase account bound yet) and the
+  // identity-mapping code treats "" as "unbound". Existing _ids, tweets,
+  // likes, retweets, subscriptions and invoices are never touched.
+  //
+  // `firebaseUid`   - UID from the verified Firebase ID token. It becomes the
+  //                   PRIMARY identity key: lookups check it before email.
+  // `firebaseProjectId` - project the UID was minted in, so a UID reused
+  //                   across projects can never be matched by UID alone.
+  firebaseUid: { type: String, default: "" },
+  firebaseProjectId: { type: String, default: "" },
 });
+
+// Sparse indexes: only documents that actually carry a value are indexed, so
+// the 30+ legacy records (empty values) stay untouched and no index churn is
+// forced on them. UID lookups become O(1) once a user is bound.
+UserSchema.index({ firebaseUid: 1 }, { sparse: true });
+UserSchema.index({ firebaseProjectId: 1 }, { sparse: true });
+UserSchema.index({ firebaseProjectId: 1, firebaseUid: 1 }, { sparse: true });
 
 export default mongoose.model("User", UserSchema);

@@ -17,6 +17,8 @@ import {
   OPEN_TWEET_EVENT,
 } from "@/lib/tweetNotifications";
 import { useAuth } from "@/context/AuthContext";
+// Internship Feature 4 (phase 1) - localized strings.
+import { useLanguage } from "@/context/LanguageContext";
 
 interface Tweet {
   id: string;
@@ -108,6 +110,8 @@ const Feed = () => {
   // finished. Used to distinguish "tweet not rendered YET" (keep waiting)
   // from "tweet really not in the feed" (show the notice).
   const [hasLoaded, setHasLoaded] = useState(false);
+  // Internship Feature 4 (phase 1).
+  const { t } = useLanguage();
 
   /**
    * Internship Feature 3 - scroll to a tweet and briefly highlight it.
@@ -174,7 +178,7 @@ const Feed = () => {
       revealTweet(decision.tweetId);
     } else if (decision.action === "missing") {
       clearPendingTweetId();
-      setRevealNotice("That tweet is not in your feed right now.");
+      setRevealNotice(t("feed.tweetNotFound"));
       setTimeout(() => setRevealNotice(""), 4000);
     }
     // "wait" and "idle" -> do nothing; the id is kept and retried below.
@@ -222,7 +226,7 @@ const Feed = () => {
       )}
       <div className="sticky top-0 bg-black/90 backdrop-blur-md border-b border-gray-800 z-10">
         <div className="px-4 py-3">
-          <h1 className="text-xl font-bold text-white">Home</h1>
+          <h1 className="text-xl font-bold text-white">{t("feed.home")}</h1>
         </div>
 
         <Tabs defaultValue="foryou" className="w-full">
@@ -236,20 +240,20 @@ const Feed = () => {
             <TabsTrigger
               value="following"
               className="data-[state=active]:bg-transparent data-[state=active]:text-white data-[state=active]:border-b-1 data-[state=active]:border-blue-100 data-[state=active]:rounded-none text-gray-400 hover:bg-gray-900/50 py-4 font-semibold"
-            >
-              Following
-            </TabsTrigger>
+            >{t("feed.following")}</TabsTrigger>
           </TabsList>
         </Tabs>
       </div>
-      <TweetComposer onTweetPosted={handlenewtweet}/>
+      {/* Feature 5: refetch after an audio tweet so the full tweet (author,
+          content, audioUrl) renders, not just the partial upload response. */}
+      <TweetComposer onTweetPosted={handlenewtweet} onAudioPosted={() => fetchTweets()} />
       <div className="divide-y divide-gray-800">
         {loading ? (
           <Card className="bg-black border-none">
             <CardContent className="py-12 text-center">
               <div className="text-gray-400 mb-4">
                 <LoadingSpinner size="lg" className="mx-auto mb-4" />
-                <p>Loading tweets...</p>
+                <p>{t("feed.loadingTweets")}</p>
               </div>
             </CardContent>
           </Card>

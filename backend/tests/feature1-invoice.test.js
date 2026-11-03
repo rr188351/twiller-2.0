@@ -36,10 +36,13 @@ const check = (name, ok, detail = "") => {
   }
 };
 
-async function call(base, path, { method = "GET", body } = {}) {
+async function call(base, path, { method = "GET", body, token } = {}) {
   const res = await fetch(`${base}${path}`, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
@@ -53,8 +56,22 @@ async function call(base, path, { method = "GET", body } = {}) {
 }
 
 async function main() {
-  const server = await startTestServer();
+  // The profile/payment routes are secured by requireFirebaseAuth, so boot the
+  // mock-Firebase backend and give every fixture user its OWN token (uid +
+  // verified email). Tokens are looked up by user id / email so the rest of the
+  // suite keeps working unchanged.
+  const server = await startTestServer({ fbMock: true });
   const BASE = server.base;
+  let tokenMap = {};
+  const tokenByUser = new Map();
+  const tokenByEmail = new Map();
+  let activeServer = server;
+  const tokenFor = (tag, email) => {
+    const token = `f1inv-tok-${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    tokenMap = { ...tokenMap, [token]: { uid: `f1inv-uid-${tag}-${token}`, email, email_verified: true } };
+    activeServer.setMap(tokenMap);
+    return token;
+  };
 
   console.log(`\nTwiller 2.0 - Feature 1 phase 3 (invoice + confirmation) test suite`);
   console.log(`Target   : ${BASE}`);
@@ -66,8 +83,10 @@ async function main() {
 
   const makeUser = async (tag) => {
     const email = `f1inv.${tag}.${stamp}@twiller.test`;
+    const token = tokenFor(tag, email);
     const reg = await call(BASE, "/register", {
       method: "POST",
+      token,
       body: {
         username: `f1inv_${tag}_${stamp}`,
         displayName: `F1 Inv ${tag}`,
@@ -76,12 +95,17 @@ async function main() {
       },
     });
     check(`setup: user ${tag} registered`, reg.status === 201, `got ${reg.status}`);
+    if (reg.body?._id) {
+      tokenByUser.set(String(reg.body._id), token);
+      tokenByEmail.set(email.toLowerCase(), token);
+    }
     return reg.body;
   };
 
   const buy = (userId, planId, opts = {}) =>
     call(BASE, "/subscription/payment", {
       method: "POST",
+      token: tokenByUser.get(String(userId)),
       body: { userId, planId, ...opts },
     });
 
@@ -147,6 +171,12 @@ async function main() {
   // is deliberately NOT installed, so `sendInvoiceEmail` prints its body
   // here. Capturing console.log verifies the payload the assignment requires
   // without any real email leaving the process.
+  // Force the console (mock) mailer for this assertion. mailer.js reads
+  // OTP_DELIVERY when it is FIRST imported and the repo's .env sets "smtp", so
+  // without this the body is never printed and the assertions below would see
+  // nothing. TEST-ONLY - production behaviour is untouched.
+  const previousOtpDelivery = process.env.OTP_DELIVERY;
+  process.env.OTP_DELIVERY = "console";
   const mailer = await import("../utils/mailer.js");
   const printed = [];
   const originalLog = console.log;
@@ -170,6 +200,8 @@ async function main() {
     tweetQuota: "unlimited",
   });
   console.log = originalLog;
+  if (previousOtpDelivery === undefined) delete process.env.OTP_DELIVERY;
+  else process.env.OTP_DELIVERY = previousOtpDelivery;
   const body = printed.join("\n");
   const goldBody = printed.filter((l) => l.includes("TEST02")).join("\n") + printed.join("\n");
   check("mailer accepted both confirmations", mailResult.delivered === true && goldResult.delivered === true);
@@ -215,6 +247,7 @@ async function main() {
   const tamper = await makeUser("tamper");
   const tamperBuy = await call(BASE, "/subscription/payment", {
     method: "POST",
+    token: tokenByUser.get(String(tamper._id)),
     body: { userId: tamper._id, planId: "bronze", amountInr: 1, asOf: OPEN, testOutcome: "success" },
   });
   check("purchase succeeds despite bogus amount field", tamperBuy.status === 201, `got ${tamperBuy.status}`);
@@ -236,7 +269,17 @@ async function main() {
   // applies. MOCK_MAIL_OUTAGE makes the console mock report failure.
   process.env.MOCK_MAIL_OUTAGE = "true";
   await new Promise((r) => setTimeout(r, 800));
-  const outageServer = await startTestServer();
+  const outageServer = await startTestServer({
+    fbMock: true,
+    // This backend must use the CONSOLE mailer: the repo's .env sets
+    // OTP_DELIVERY=smtp, which would send real mail and the outage hatch only
+    // exists in the console provider.
+    env: { OTP_DELIVERY: "console", MOCK_MAIL_OUTAGE: "true" },
+  });
+  // The outage backend is a NEW process: point the token registry at it and
+  // re-seed every token issued so far (setMap replaces the whole map).
+  activeServer = outageServer;
+  outageServer.setMap(tokenMap);
 
   const outUser = await makeUser("outage");
   const outBuy = await buy(outUser._id, "gold", { asOf: OPEN, testOutcome: "success" });
@@ -245,7 +288,7 @@ async function main() {
   check("API honestly reports emailDelivery failed", outBuy.body?.emailDelivery === "failed", `got ${outBuy.body?.emailDelivery}`);
   check("response does NOT claim email was sent", outBuy.body?.emailDelivery !== "sent");
 
-  const outProfile = await call(BASE, `/loggedinuser?email=${encodeURIComponent(outUser.email)}`);
+  const outProfile = await call(BASE, `/loggedinuser`, { token: tokenByEmail.get(String(outUser.email).toLowerCase()) });
   check("plan still activated (gold)", outProfile.body?.plan === "gold", `plan=${outProfile.body?.plan}`);
 
   const outRows = await invoicesFor(outUser._id);

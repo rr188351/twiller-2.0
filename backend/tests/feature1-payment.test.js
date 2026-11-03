@@ -40,10 +40,13 @@ const check = (name, ok, detail = "") => {
   }
 };
 
-async function call(base, path, { method = "GET", body } = {}) {
+async function call(base, path, { method = "GET", body, token } = {}) {
   const res = await fetch(`${base}${path}`, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
@@ -61,8 +64,20 @@ async function call(base, path, { method = "GET", body } = {}) {
 const atIst = (time) => `2026-11-04T${time}+05:30`;
 
 async function main() {
-  const server = await startTestServer();
+  // Secured routes need a verified token: boot the mock-Firebase backend and
+  // give every fixture user its OWN token (uid + verified email), looked up by
+  // user id / email so the rest of the suite keeps working unchanged.
+  const server = await startTestServer({ fbMock: true });
   const BASE = server.base;
+  let tokenMap = {};
+  const tokenByUser = new Map();
+  const tokenByEmail = new Map();
+  const tokenFor = (tag, email) => {
+    const token = `f1pay-tok-${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    tokenMap = { ...tokenMap, [token]: { uid: `f1pay-uid-${tag}-${token}`, email, email_verified: true } };
+    server.setMap(tokenMap);
+    return token;
+  };
 
   console.log(`\nTwiller 2.0 - Feature 1 phase 2 (mock subscription) test suite`);
   console.log(`Target   : ${BASE}`);
@@ -74,8 +89,10 @@ async function main() {
 
   const makeUser = async (tag) => {
     const email = `f1pay.${tag}.${stamp}@twiller.test`;
+    const token = tokenFor(tag, email);
     const reg = await call(BASE, "/register", {
       method: "POST",
+      token,
       body: {
         username: `f1pay_${tag}_${stamp}`,
         displayName: `F1 Pay ${tag}`,
@@ -84,17 +101,24 @@ async function main() {
       },
     });
     check(`setup: user ${tag} registered`, reg.status === 201, `got ${reg.status}`);
+    if (reg.body?._id) {
+      tokenByUser.set(String(reg.body._id), token);
+      tokenByEmail.set(email.toLowerCase(), token);
+    }
     return reg.body;
   };
 
   const buy = (userId, planId, opts = {}) =>
     call(BASE, "/subscription/payment", {
       method: "POST",
+      token: tokenByUser.get(String(userId)),
       body: { userId, planId, ...opts },
     });
 
   const profileOf = async (email) => {
-    const res = await call(BASE, `/loggedinuser?email=${encodeURIComponent(email)}`);
+    const res = await call(BASE, `/loggedinuser`, {
+      token: tokenByEmail.get(String(email).toLowerCase()),
+    });
     return res.body;
   };
 
@@ -177,11 +201,13 @@ async function main() {
   const capped = await makeUser("capped");
   const firstTweet = await call(BASE, "/post", {
     method: "POST",
+    token: tokenByUser.get(String(capped._id)),
     body: { author: capped._id, content: `cap one ${stamp}`, image: "" },
   });
   check("free user posts first tweet", firstTweet.status === 201);
   const blocked = await call(BASE, "/post", {
     method: "POST",
+    token: tokenByUser.get(String(capped._id)),
     body: { author: capped._id, content: `cap two ${stamp}`, image: "" },
   });
   check("free quota exhausted as before", blocked.status === 429);
@@ -189,18 +215,27 @@ async function main() {
   check("bronze purchase succeeds", upgrade.status === 201);
   const afterUpgrade = await call(BASE, "/post", {
     method: "POST",
+    token: tokenByUser.get(String(capped._id)),
     body: { author: capped._id, content: `cap two retry ${stamp}`, image: "" },
   });
   check("same-month slot opens up under bronze", afterUpgrade.status === 201, `got ${afterUpgrade.status}`);
 
   console.log("\n[8] invalid requests are rejected safely");
-  const noUser = await buy("000000000000000000000000", "bronze", { asOf: OPEN });
-  check("unknown userId rejected with 404", noUser.status === 404, `got ${noUser.status}`);
+  // A client cannot pay for someone else: the secured route compares the body
+  // userId with the VERIFIED token user and refuses a mismatch (403).
+  const noUser = await call(BASE, "/subscription/payment", {
+    method: "POST",
+    token: tokenByUser.get(String(validator._id)),
+    body: { userId: "000000000000000000000000", planId: "bronze", asOf: OPEN },
+  });
+  check("foreign userId rejected with 403 identity-mismatch", noUser.status === 403 && noUser.body?.code === "identity-mismatch", `got ${noUser.status}`);
+  // Omitting userId is fine (the token identifies the payer) - but an
+  // UNAUTHENTICATED request must be refused.
   const noId = await call(BASE, "/subscription/payment", {
     method: "POST",
     body: { planId: "bronze", asOf: OPEN },
   });
-  check("missing userId rejected with 400", noId.status === 400, `got ${noId.status}`);
+  check("unauthenticated payment rejected with 401", noId.status === 401, `got ${noId.status}`);
 
   // ---- clean up ONLY what this run created ---------------------------
   await removeTestFixtures(server.mongoUrl, ["f1pay\\."], []);

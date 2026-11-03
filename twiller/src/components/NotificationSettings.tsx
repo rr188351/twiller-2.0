@@ -84,7 +84,7 @@ export default function NotificationSettings() {
       } else if (nextValue && permission === "unsupported") {
         setMessage("This browser does not support notifications.");
       } else if (nextValue && permission === "granted") {
-        setMessage("You will be notified when a tweet mentions cricket and science.");
+        setMessage("You will be notified when a tweet mentions cricket or science.");
       }
     } catch (error: any) {
       setMessage(
@@ -110,8 +110,8 @@ export default function NotificationSettings() {
           <div className="min-w-0">
             <p className="text-white font-semibold text-sm">Cricket &amp; Science alerts</p>
             <p className="text-gray-400 text-xs mt-0.5">
-              Get a browser notification when a new tweet contains both
-              &ldquo;cricket&rdquo; and &ldquo;science&rdquo;.
+              Get a browser notification when a new tweet mentions
+              &ldquo;cricket&rdquo; or &ldquo;science&rdquo;.
             </p>
             {message && <p className="text-blue-300 text-xs mt-1">{message}</p>}
             {isUnsupported && (

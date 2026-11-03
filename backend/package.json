@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "nodemon index.js",
+    "dev": "nodemon index.js",
+    "start": "node index.js",
+    "start:dev": "nodemon index.js",
     "test": "node tests/feature6.test.js",
     "test:all": "node tests/feature6.test.js"
   },
@@ -16,8 +18,10 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
+    "firebase-admin": "^13.5.0",
     "mongodb": "^6.19.0",
     "mongoose": "^8.18.0",
+    "nodemailer": "^6.14.0",
     "nodemon": "^3.1.10"
   }
 }

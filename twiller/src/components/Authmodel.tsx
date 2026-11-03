@@ -15,6 +15,8 @@ import TwitterLogo from './Twitterlogo';
 // Internship Feature 6 - Forgot Password. Reuses this modal as the entry
 // point, exactly like Twiller reuses its other components.
 import ForgotPassword from './ForgotPassword';
+// Internship Feature 4 (phase 1) - localized auth labels and validation.
+import { useLanguage } from '@/context/LanguageContext';
 
 
 
@@ -37,6 +39,9 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
   const [errors, setErrors] = useState<Record<string, string>>({});
   // Internship Feature 6 - opens the ForgotPassword modal.
   const [showForgotPassword, setShowForgotPassword] = useState(false);
+  // Feature 4 - hook MUST be declared before any early return (line "if
+  // (!isOpen)") so the hook order stays stable across open/closed renders.
+  const { t } = useLanguage();
 
   /**
    * BUG FIX - the modal ignored which button was clicked.
@@ -66,28 +71,28 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
     const newErrors: Record<string, string> = {};
 
     if (!formData.email.trim()) {
-      newErrors.email = 'Email is required';
+      newErrors.email = t('auth.errEmailRequired');
     } else if (!/\S+@\S+\.\S+/.test(formData.email)) {
-      newErrors.email = 'Please enter a valid email';
+      newErrors.email = t('auth.errEmailInvalid');
     }
 
     if (!formData.password.trim()) {
-      newErrors.password = 'Password is required';
+      newErrors.password = t('auth.errPasswordRequired');
     } else if (formData.password.length < 6) {
-      newErrors.password = 'Password must be at least 6 characters';
+      newErrors.password = t('auth.errPasswordShort');
     }
 
     if (mode === 'signup') {
       if (!formData.username.trim()) {
-        newErrors.username = 'Username is required';
+        newErrors.username = t('auth.errUsernameRequired');
       } else if (formData.username.length < 3) {
-        newErrors.username = 'Username must be at least 3 characters';
+        newErrors.username = t('auth.errUsernameShort');
       } else if (!/^[a-zA-Z0-9_]+$/.test(formData.username)) {
-        newErrors.username = 'Username can only contain letters, numbers, and underscores';
+        newErrors.username = t('auth.errUsernameChars');
       }
 
       if (!formData.displayName.trim()) {
-        newErrors.displayName = 'Display name is required';
+        newErrors.displayName = t('auth.errDisplayNameRequired');
       }
     }
 
@@ -149,7 +154,7 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
               <TwitterLogo size="xl" className="text-white" />
             </div>
             <CardTitle className="text-2xl font-bold">
-              {mode === 'login' ? 'Sign in to X' : 'Create your account'}
+              {mode === 'login' ? t('auth.signInTitle') : t('auth.signupTitle')}
             </CardTitle>
           </div>
         </CardHeader>
@@ -165,13 +170,13 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
             {mode === 'signup' && (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="displayName" className="text-white">Display Name</Label>
+                  <Label htmlFor="displayName" className="text-white">{t('auth.displayName')}</Label>
                   <div className="relative">
                     <User className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-5 w-5" />
                     <Input
                       id="displayName"
                       type="text"
-                      placeholder="Your display name"
+                      placeholder={t('auth.displayNamePlaceholder')}
                       value={formData.displayName}
                       onChange={(e) => handleInputChange('displayName', e.target.value)}
                       className="pl-10 bg-transparent border-gray-600 text-white placeholder-gray-400 focus:border-blue-500"
@@ -184,13 +189,13 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="username" className="text-white">Username</Label>
+                  <Label htmlFor="username" className="text-white">{t('auth.username')}</Label>
                   <div className="relative">
                     <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400">@</span>
                     <Input
                       id="username"
                       type="text"
-                      placeholder="username"
+                      placeholder={t('auth.usernamePlaceholder')}
                       value={formData.username}
                       onChange={(e) => handleInputChange('username', e.target.value)}
                       className="pl-8 bg-transparent border-gray-600 text-white placeholder-gray-400 focus:border-blue-500"
@@ -205,13 +210,13 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
             )}
 
             <div className="space-y-2">
-              <Label htmlFor="email" className="text-white">Email</Label>
+              <Label htmlFor="email" className="text-white">{t('auth.email')}</Label>
               <div className="relative">
                 <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-5 w-5" />
                 <Input
                   id="email"
                   type="email"
-                  placeholder="Enter your email"
+                  placeholder={t('auth.emailPlaceholder')}
                   value={formData.email}
                   onChange={(e) => handleInputChange('email', e.target.value)}
                   className="pl-10 bg-transparent border-gray-600 text-white placeholder-gray-400 focus:border-blue-500"
@@ -224,13 +229,13 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="password" className="text-white">Password</Label>
+              <Label htmlFor="password" className="text-white">{t('auth.password')}</Label>
               <div className="relative">
                 <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-5 w-5" />
                 <Input
                   id="password"
                   type={showPassword ? 'text' : 'password'}
-                  placeholder="Enter your password"
+                  placeholder={t('auth.passwordPlaceholder')}
                   value={formData.password}
                   onChange={(e) => handleInputChange('password', e.target.value)}
                   className="pl-10 pr-10 bg-transparent border-gray-600 text-white placeholder-gray-400 focus:border-blue-500"
@@ -259,7 +264,7 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
                   onClick={() => setShowForgotPassword(true)}
                   className="text-sm text-blue-400 hover:text-blue-300 font-medium"
                 >
-                  Forgot password?
+                  {t('auth.forgotPassword')}
                 </button>
               </div>
             )}
@@ -272,10 +277,10 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
               {isLoading ? (
                 <div className="flex items-center space-x-2">
                   <LoadingSpinner size="sm" />
-                  <span>{mode === 'login' ? 'Signing in...' : 'Creating account...'}</span>
+                  <span>{mode === 'login' ? t('auth.signingIn') : t('auth.creatingAccount')}</span>
                 </div>
               ) : (
-                mode === 'login' ? 'Sign in' : 'Create account'
+                mode === 'login' ? t('auth.signIn') : t('auth.createAccount')
               )}
             </Button>
           </form>
@@ -283,27 +288,27 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }: Au
           <div className="relative">
             <Separator className="bg-gray-700" />
             <span className="absolute left-1/2 top-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black px-2 text-gray-400 text-sm">
-              OR
+              {t('auth.orDivider')}
             </span>
           </div>
 
           <div className="text-center">
             <p className="text-gray-400">
-              {mode === 'login' ? "Don't have an account?" : "Already have an account?"}
+              {mode === 'login' ? t('auth.noAccount') : t('auth.hasAccount')}
               <Button
                 variant="link"
                 className="text-blue-400 hover:text-blue-300 font-semibold pl-1"
                 onClick={switchMode}
                 disabled={isLoading}
               >
-                {mode === 'login' ? 'Sign up' : 'Sign in'}
+                {mode === 'login' ? t('auth.signUpLink') : t('auth.signInLink')}
               </Button>
             </p>
           </div>
 
           {mode === 'signup' && (
             <div className="text-center text-xs text-gray-400">
-              By signing up, you agree to our Terms of Service and Privacy Policy, including Cookie Use.
+              {t('auth.termsLine')}
             </div>
           )}
         </CardContent>

@@ -14,7 +14,12 @@ const buttonVariants = cva(
         destructive:
           "bg-destructive text-white shadow-xs hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 dark:bg-destructive/60",
         outline:
-          "border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:bg-input/30 dark:border-input dark:hover:bg-input/50",
+          // Dark-UI safe: this app's :root tokens are LIGHT (--background is
+          // white) and the `.dark` class is never applied, so `bg-background`
+          // painted a WHITE button behind white text (invisible). A transparent
+          // background with a neutral hover keeps every existing caller
+          // readable - callers wanting a solid look pass their own bg-* class.
+          "border bg-transparent shadow-xs hover:bg-white/10 dark:bg-input/30 dark:border-input dark:hover:bg-input/50",
         secondary:
           "bg-secondary text-secondary-foreground shadow-xs hover:bg-secondary/80",
         ghost:

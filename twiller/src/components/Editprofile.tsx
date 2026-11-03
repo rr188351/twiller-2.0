@@ -1,14 +1,47 @@
 import { useAuth } from "@/context/AuthContext";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { Button } from "./ui/button";
-import { Camera, LinkIcon, MapPin, X } from "lucide-react";
+import { Camera, LinkIcon, MapPin, X, Phone } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 import { Label } from "./ui/label";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
 import LoadingSpinner from "./loading-spinner";
-import axios from "axios";
+// Image uploads now go through Twiller's OWN authenticated backend endpoint
+// instead of a hardcoded third-party (imgbb) API key.
+import {
+  uploadImage,
+  MAX_IMAGE_SIZE_BYTES,
+  ALLOWED_IMAGE_MIME_TYPES,
+} from "@/lib/uploadImage";
+// Internship Feature 4 (phase 1) - localized strings.
+import { useLanguage } from "@/context/LanguageContext";
+
+// Internship Feature 4 (phase 2) - country dial codes offered in the profile
+// form. The digits are what gets prepended to the national number before it is
+// sent to the backend, which stores ONLY digits (e.g. "+91 98765 43210" ->
+// "919876543210"). Keep this list to codes the mentors' locales actually use.
+const DIAL_CODES = [
+  "+91", "+1", "+44", "+61", "+971", "+49", "+33", "+34", "+351",
+  "+55", "+86", "+81", "+65", "+7", "+27", "+880", "+92", "+94", "+977",
+];
+const DEFAULT_DIAL_CODE = "+91";
+
+/** Splits a stored digits-only phone back into { dialCode, national }. */
+function splitStoredPhone(stored: string): { dialCode: string; national: string } {
+  const digits = String(stored || "").replace(/\D/g, "");
+  if (!digits) return { dialCode: DEFAULT_DIAL_CODE, national: "" };
+  // Longest-prefix match, so a 3-digit code can never lose to "+1"/"+7".
+  const candidates = DIAL_CODES.map((c) => ({ dialCode: c, code: c.replace(/\D/g, "") }))
+    .filter((c) => digits.startsWith(c.code))
+    .sort((a, b) => b.code.length - a.code.length);
+  if (candidates.length) {
+    const { dialCode, code } = candidates[0];
+    return { dialCode, national: digits.slice(code.length) };
+  }
+  return { dialCode: DEFAULT_DIAL_CODE, national: digits };
+}
 
 const Editprofile = ({ isopen, onclose }: any) => {
   const { user, updateProfile } = useAuth();
@@ -19,32 +52,77 @@ const Editprofile = ({ isopen, onclose }: any) => {
     location: "Earth",
     website: "example.com",
     avatar: user?.avatar || "",
+    // Normalised digits (dial code + national number). "" = no phone on file.
+    phone: "",
   });
   const [error, setError] = useState<any>({});
+  const [uploadError, setUploadError] = useState("");
+  // Internship Feature 4 (phase 2) - phone number split into dial code +
+  // national number. `formData.phone` always carries the NORMALISED digits the
+  // backend writes, so the language-switch SMS flow can use it immediately.
+  const [dialCode, setDialCode] = useState(DEFAULT_DIAL_CODE);
+  const [phoneNational, setPhoneNational] = useState("");
+  // Internship Feature 4 (phase 1).
+  const { t } = useLanguage();
+
+  // Re-sync the form from the server profile whenever the modal opens; the
+  // useState initialiser above only ever ran on the very first mount.
+  useEffect(() => {
+    if (!isopen || !user) return;
+    const parsed = splitStoredPhone(user.phone || "");
+    setDialCode(parsed.dialCode);
+    setPhoneNational(parsed.national);
+    setFormdata((prev) => ({
+      ...prev,
+      phone: parsed.national ? parsed.dialCode.replace(/\D/g, "") + parsed.national : "",
+    }));
+    setError({});
+    setUploadError("");
+  }, [isopen, user]);
+
   if (!isopen || !user) return null;
   const validateForm = () => {
     const newErrors: Record<string, string> = {};
 
     if (!formData.displayName.trim()) {
-      newErrors.displayName = "Display name is required";
+      newErrors.displayName = t("editProfile.errDisplayNameRequired");
     } else if (formData.displayName.length > 50) {
-      newErrors.displayName = "Display name must be 50 characters or less";
+      newErrors.displayName = t("editProfile.errDisplayNameLong");
     }
 
     if (formData.bio.length > 160) {
-      newErrors.bio = "Bio must be 160 characters or less";
+      newErrors.bio = t("editProfile.errBioLong");
     }
 
     if (formData.website && formData.website.length > 100) {
-      newErrors.website = "Website must be 100 characters or less";
+      newErrors.website = t("editProfile.errWebsiteLong");
     }
 
     if (formData.location && formData.location.length > 30) {
-      newErrors.location = "Location must be 30 characters or less";
+      newErrors.location = t("editProfile.errLocationLong");
+    }
+
+    // Internship Feature 4 (phase 2): a typed national number must combine with
+    // the dial code into a plausible E.164-ish value (>= 7 digits). Leaving it
+    // blank is allowed and clears the stored number.
+    const combinedDigits = `${dialCode}${phoneNational}`.replace(/\D/g, "");
+    if (phoneNational && combinedDigits.length < 7) {
+      newErrors.phone = t("phone.errInvalid");
     }
 
     setError(newErrors);
     return Object.keys(newErrors).length === 0;
+  };
+
+  /** Updates the dial code + national number and keeps formData.phone in sync. */
+  const applyPhone = (nextDialCode: string, nextNational: string) => {
+    const nationalDigits = String(nextNational || "").replace(/\D/g, "");
+    setDialCode(nextDialCode);
+    setPhoneNational(nationalDigits);
+    setFormdata((prev) => ({
+      ...prev,
+      phone: nationalDigits ? nextDialCode.replace(/\D/g, "") + nationalDigits : "",
+    }));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -53,10 +131,23 @@ const Editprofile = ({ isopen, onclose }: any) => {
 
     setIsLoading(true);
     try {
-      await updateProfile(formData);
+      // Send the normalised phone explicitly so the backend's normalisation and
+      // duplicate check always see the fully-qualified number.
+      const payload = {
+        ...formData,
+        phone: phoneNational
+          ? `${dialCode.replace(/\D/g, "")}${phoneNational}`
+          : "",
+      };
+      await updateProfile(payload);
       onclose();
-    } catch (error) {
-      setError({ general: "Failed to update profile. Please try again." });
+    } catch (err: any) {
+      const message = String(err?.message || "");
+      if (/phone number is already used/i.test(message)) {
+        setError({ general: t("phone.errTaken") });
+      } else {
+        setError({ general: message || t("editProfile.errSaveFailed") });
+      }
     } finally {
       setIsLoading(false);
     }
@@ -71,23 +162,29 @@ const Editprofile = ({ isopen, onclose }: any) => {
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
-    setIsLoading(true);
     const image = e.target.files[0];
-    const formdataimg = new FormData();
-    formdataimg.set("image", image);
+    setUploadError("");
+    if (!ALLOWED_IMAGE_MIME_TYPES.includes(image.type)) {
+      setUploadError(t("upload.imageBadType"));
+      e.target.value = "";
+      return;
+    }
+    if (image.size > MAX_IMAGE_SIZE_BYTES) {
+      setUploadError(t("upload.imageTooLarge"));
+      e.target.value = "";
+      return;
+    }
+    setIsLoading(true);
     try {
-      const res = await axios.post(
-        "https://api.imgbb.com/1/upload?key=97f3fb960c3520d6a88d7e29679cf96f",
-        formdataimg
-      );
-      const url = res.data.data.display_url;
+      const { url } = await uploadImage(image);
       if (url) {
         setFormdata((prev) => ({ ...prev, avatar: url }));
       }
-    } catch (error) {
-      console.log(error);
+    } catch {
+      setUploadError(t("upload.imageFailed"));
     } finally {
       setIsLoading(false);
+      e.target.value = "";
     }
   };
   return (
@@ -116,10 +213,10 @@ const Editprofile = ({ isopen, onclose }: any) => {
               {isLoading ? (
                 <div className="flex items-center space-x-2">
                   <LoadingSpinner size="sm" />
-                  <span>Saving...</span>
+                  <span>{t("editProfile.saving")}</span>
                 </div>
               ) : (
-                "Save"
+                t("editProfile.save")
               )}
             </Button>
           </div>
@@ -129,6 +226,11 @@ const Editprofile = ({ isopen, onclose }: any) => {
           {error.general && (
             <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 text-red-400 text-sm m-4">
               {error.general}
+            </div>
+          )}
+          {uploadError && (
+            <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 text-red-400 text-sm m-4">
+              {uploadError}
             </div>
           )}
 
@@ -151,7 +253,7 @@ const Editprofile = ({ isopen, onclose }: any) => {
               <div className="absolute -bottom-16 left-4">
                 <div className="relative">
                   <Avatar className="h-32 w-32 border-4 border-black">
-                    <AvatarImage src={user?.avatar} alt={user?.displayName} />
+                    <AvatarImage src={formData.avatar || user?.avatar} alt={user?.displayName} />
                     <AvatarFallback className="text-2xl">
                       {user?.displayName?.[0]}
                     </AvatarFallback>
@@ -287,6 +389,47 @@ const Editprofile = ({ isopen, onclose }: any) => {
                     {formData.website.length}/100
                   </p>
                 </div>
+              </div>
+
+              {/* Internship Feature 4 (phase 2) - phone number used for the
+                  language-switch SMS codes. Stored digits-only. */}
+              <div className="space-y-2">
+                <Label htmlFor="phone" className="text-white">
+                  {t("phone.label")}
+                </Label>
+                <div className="flex gap-2">
+                  <select
+                    aria-label={t("phone.dialCode")}
+                    value={dialCode}
+                    onChange={(e) => applyPhone(e.target.value, phoneNational)}
+                    disabled={isLoading}
+                    className="h-9 rounded-md border border-gray-600 bg-black text-white text-sm px-2 outline-none focus:border-blue-500"
+                  >
+                    {DIAL_CODES.map((code) => (
+                      <option key={code} value={code}>
+                        {code}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="relative flex-1">
+                    <Phone className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-5 w-5" />
+                    <Input
+                      id="phone"
+                      type="tel"
+                      inputMode="tel"
+                      value={phoneNational}
+                      onChange={(e) => applyPhone(dialCode, e.target.value)}
+                      className="pl-10 bg-transparent border-gray-600 text-white placeholder-gray-400 focus:border-blue-500"
+                      placeholder={t("phone.placeholder")}
+                      maxLength={15}
+                      disabled={isLoading}
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-gray-500">{t("phone.hint")}</p>
+                {error.phone && (
+                  <p className="text-red-400 text-sm">{error.phone}</p>
+                )}
               </div>
             </div>
           </form>

@@ -38,6 +38,9 @@ import {
 } from "@/lib/passwordGenerator";
 import { auth, sendPasswordResetEmail, confirmPasswordReset } from "@/context/firebase";
 
+// Internship Feature 4 (phase 1) - localized strings.
+import { useLanguage } from "@/context/LanguageContext";
+
 interface ForgotPasswordProps {
   isOpen: boolean;
   onClose: () => void;
@@ -58,6 +61,8 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [devHint, setDevHint] = useState("");
+  // Internship Feature 4 (phase 1).
+  const { t } = useLanguage();
 
   if (!isOpen) return null;
 
@@ -92,7 +97,7 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
   const handleRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!identifier.trim()) {
-      setError("Please enter your email address or phone number.");
+      setError(t("forgot.errIdentifierClient"));
       return;
     }
 
@@ -113,7 +118,7 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
 
       if (resolvedChannel === "phone") {
         setChannel("phone");
-        setInfo(res.data.message || "A verification code has been sent to your phone.");
+        setInfo(res.data.message || t("forgot.infoPhoneSent"));
         if (res.data?.devCode) {
           setDevHint(`Development mode - your verification code is ${res.data.devCode}`);
         }
@@ -123,22 +128,26 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
 
       if (resolvedChannel === "email") {
         setChannel("email");
-        // Firebase sends the real reset email from the browser.
+        // Firebase sends the real reset email from the browser. The reset LINK
+        // completes the change on Firebase's own secure page, so this widget
+        // must NOT ask for a code or a new password for the email channel.
         await sendPasswordResetEmail(auth, identifier.trim(), actionCodeSettings);
-        setInfo("We have emailed you a reset code. Enter it below with your new password.");
-        setStep("new-password");
+        setInfo("");
+        setStep("done");
         return;
       }
 
-      setInfo(res.data?.message || "If that account exists, recovery instructions have been sent.");
+      setInfo(res.data?.message || t("forgot.infoGeneric"));
     } catch (err: any) {
       const data = err?.response?.data;
       if (data?.dailyLimitReached) {
         setError(
-          `${data.error} Next attempt available at ${new Date(data.nextAllowedAt).toLocaleString()}.`
+          `${data.error} ${t("forgot.nextAttemptAt", {
+            time: new Date(data.nextAllowedAt).toLocaleString(),
+          })}`
         );
       } else {
-        setError(data?.error || "Something went wrong. Please try again.");
+        setError(data?.error || t("forgot.errGeneric"));
       }
     } finally {
       setIsLoading(false);
@@ -149,7 +158,7 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
   const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!/^\d{6}$/.test(otp.trim())) {
-      setError("Please enter the 6-digit verification code.");
+      setError(t("forgot.errOtpFormat"));
       return;
     }
 
@@ -163,23 +172,22 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
       });
 
       setRecoveryToken(res.data.recoveryToken);
-      setInfo("Phone verified. Now confirm the email code to set your new password.");
+      setInfo(t("forgot.infoPhoneVerified"));
 
       // Firebase is the second factor that actually changes the password.
       // Every Twiller account has an email (it is required by the User model).
-      const profile = await axiosInstance.get("/loggedinuser", {
-        params: { email: identifier.includes("@") ? identifier.trim() : "" },
-      });
+      // The interceptor attaches the Firebase token; the backend resolves the
+      // signed-in user's profile from the verified token, so the email below
+      // belongs to the caller and is safe to use for the reset link.
+      const profile = await axiosInstance.get("/loggedinuser");
       const email = profile.data?.email;
       if (email) {
         await sendPasswordResetEmail(auth, email, actionCodeSettings);
-        setInfo(
-          "Phone verified. We have emailed you a reset code - enter it below with your new password."
-        );
+        setInfo(t("forgot.infoPhoneVerifiedEmail"));
       }
       setStep("new-password");
     } catch (err: any) {
-      setError(err?.response?.data?.error || "Verification failed. Please try again.");
+      setError(err?.response?.data?.error || t("forgot.errVerifyFailed"));
     } finally {
       setIsLoading(false);
     }
@@ -197,7 +205,7 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      setError("Could not copy automatically. Please select and copy manually.");
+      setError(t("forgot.errCopyFailed"));
     }
   };
 
@@ -206,7 +214,7 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
     e.preventDefault();
 
     if (!resetCode.trim()) {
-      setError("Please enter the reset code from your email.");
+      setError(t("forgot.errResetCodeClient"));
       return;
     }
 
@@ -235,18 +243,24 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
       setError(
         err?.response?.data?.error ||
           err?.message ||
-          "That reset code is invalid or has expired. Please request a new one."
+          t("forgot.errResetInvalid")
       );
     } finally {
       setIsLoading(false);
     }
   };
 
-  const stepLabels: Array<{ key: Step; label: string }> = [
-    { key: "identify", label: "1. Identify" },
-    { key: "verify", label: "2. Verify" },
-    { key: "new-password", label: "3. New password" },
-  ];
+  // The EMAIL flow ends at "identify" (Firebase's reset link does the rest), so
+  // the verify / new-password steps are only shown for the phone two-factor
+  // flow where they are genuinely used.
+  const stepLabels: Array<{ key: Step; label: string }> =
+    channel === "email"
+      ? [{ key: "identify", label: t("forgot.step1Label") }]
+      : [
+          { key: "identify", label: t("forgot.step1Label") },
+          { key: "verify", label: t("forgot.step2Label") },
+          { key: "new-password", label: t("forgot.step3Label") },
+        ];
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
@@ -255,14 +269,14 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
           <div className="flex items-center justify-between">
             <CardTitle className="text-xl font-bold text-white flex items-center gap-2">
               <KeyRound className="h-5 w-5" />
-              Reset your password
+                {t("forgot.title")}
             </CardTitle>
             <Button
               variant="ghost"
               size="sm"
               className="text-gray-400 hover:text-white"
               onClick={handleClose}
-              aria-label="Close"
+              aria-label={t("common.close")}
             >
               <X className="h-5 w-5" />
             </Button>
@@ -290,15 +304,19 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
           {step === "done" ? (
             <div className="space-y-4 text-center py-4">
               <ShieldCheck className="h-12 w-12 text-green-500 mx-auto" />
-              <p className="text-white font-semibold">Password updated successfully</p>
+              <p className="text-white font-semibold">
+                {channel === "email" ? t("forgot.checkInbox") : t("forgot.doneTitle")}
+              </p>
               <p className="text-sm text-gray-400">
-                You can now sign in with your new password.
+                {channel === "email"
+                  ? t("pwreset.emailSentMessage")
+                  : t("forgot.doneMessage")}
               </p>
               <Button
                 className="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-full"
                 onClick={handleClose}
               >
-                Back to sign in
+                {t("auth.signInLink")}
               </Button>
             </div>
           ) : (
@@ -320,13 +338,13 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
                 <form onSubmit={handleRequest} className="space-y-4">
                   <div className="space-y-2">
                     <Label htmlFor="fp-identifier" className="text-white">
-                      Email or phone number
+                      {t("forgot.identifierLabel")}
                     </Label>
                     <div className="relative">
                       <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 h-5 w-5" />
                       <Input
                         id="fp-identifier"
-                        placeholder="you@example.com or +91 98765 43210"
+                        placeholder={t("forgot.identifierPlaceholder")}
                         value={identifier}
                         onChange={(e) => setIdentifier(e.target.value)}
                         className="pl-10 bg-transparent border-gray-600 text-white placeholder-gray-400 focus:border-blue-500"
@@ -334,7 +352,7 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
                       />
                     </div>
                     <p className="text-xs text-gray-500">
-                      You can request a password reset only once every 24 hours.
+                      {t("forgot.hintOncePerDay")}
                     </p>
                   </div>
 
@@ -346,10 +364,10 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
                     {isLoading ? (
                       <div className="flex items-center gap-2">
                         <LoadingSpinner size="sm" />
-                        <span>Sending...</span>
+                        <span>{t("forgot.sending")}</span>
                       </div>
                     ) : (
-                      "Send recovery code"
+                      t("forgot.sendLink")
                     )}
                   </Button>
                 </form>
@@ -359,13 +377,13 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
                 <form onSubmit={handleVerifyOtp} className="space-y-4">
                   <div className="space-y-2">
                     <Label htmlFor="fp-otp" className="text-white">
-                      6-digit verification code
+                      {t("forgot.otpLabel")}
                     </Label>
                     <Input
                       id="fp-otp"
                       inputMode="numeric"
                       maxLength={6}
-                      placeholder="123456"
+                      placeholder={t("forgot.otpPlaceholder")}
                       value={otp}
                       onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))}
                       className="bg-transparent border-gray-600 text-white text-center text-2xl tracking-[0.4em] placeholder-gray-600 focus:border-blue-500"
@@ -378,7 +396,7 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
                     disabled={isLoading || otp.length !== 6}
                     className="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-full"
                   >
-                    {isLoading ? "Verifying..." : "Verify code"}
+                    {isLoading ? t("forgot.verifying") : t("forgot.verify")}
                   </Button>
 
                   <Button
@@ -387,7 +405,7 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
                     onClick={() => setStep("identify")}
                     className="w-full text-gray-400 hover:text-white"
                   >
-                    Use a different account
+                    {t("forgot.useDifferent")}
                   </Button>
                 </form>
               )}
@@ -397,11 +415,11 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
                 <form onSubmit={handleResetPassword} className="space-y-4">
                   <div className="space-y-2">
                     <Label htmlFor="fp-code" className="text-white">
-                      Reset code from your email
+                      {t("forgot.resetCodeLabel")}
                     </Label>
                     <Input
                       id="fp-code"
-                      placeholder="Paste the code Firebase emailed you"
+                      placeholder={t("forgot.resetCodePlaceholder")}
                       value={resetCode}
                       onChange={(e) => setResetCode(e.target.value)}
                       className="bg-transparent border-gray-600 text-white placeholder-gray-400 focus:border-blue-500"
@@ -414,14 +432,14 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <Label htmlFor="fp-newpass" className="text-white">
-                        New password
+                        {t("forgot.newPasswordLabel")}
                       </Label>
                       <button
                         type="button"
                         onClick={handleGenerate}
                         className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300"
                       >
-                        <RefreshCw className="h-3 w-3" /> Generate
+                        <RefreshCw className="h-3 w-3" /> {t("forgot.generate")}
                       </button>
                     </div>
                     <div className="flex gap-2">
@@ -429,7 +447,7 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
                         id="fp-newpass"
                         value={newPassword}
                         onChange={(e) => setNewPassword(e.target.value)}
-                        placeholder="Letters only - no numbers or symbols"
+                        placeholder={t("forgot.newPasswordPlaceholder")}
                         className="bg-transparent border-gray-600 text-white placeholder-gray-400 focus:border-blue-500 font-mono"
                         disabled={isLoading}
                       />
@@ -440,7 +458,7 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
                         onClick={handleCopy}
                         disabled={!newPassword}
                         className="border-gray-600 text-white hover:bg-gray-900"
-                        aria-label="Copy password"
+                        aria-label={t("common.copyPassword")}
                       >
                         {copied ? (
                           <Check className="h-4 w-4 text-green-400" />
@@ -450,8 +468,7 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
                       </Button>
                     </div>
                     <p className="text-xs text-gray-500">
-                      Must use uppercase and lowercase English letters only. No numbers, no
-                      special characters.
+                      {t("forgot.passwordHint")}
                     </p>
                   </div>
 
@@ -460,7 +477,7 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
                     disabled={isLoading || !resetCode || !newPassword}
                     className="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-full"
                   >
-                    {isLoading ? "Updating..." : "Set new password"}
+                    {isLoading ? t("forgot.updating") : t("forgot.setNewPassword")}
                   </Button>
                 </form>
               )}

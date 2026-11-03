@@ -6,6 +6,8 @@ import { Input } from '../ui/input';
 import { Card, CardContent } from '../ui/card';
 import { Button } from '../ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '../ui/avatar';
+// Internship Feature 4 (phase 1) - localized right-rail strings.
+import { useLanguage } from '@/context/LanguageContext';
 
 
 
@@ -22,7 +24,12 @@ const suggestions = [
     id: '2',
     username: 'akshaykumar',
     displayName: 'Akshay Kumar',
-    avatar: 'https://images.pexels.com/photos/1382735/pexels-photo-1382735.jpeg?auto=compress&cs=tinysrgb&w=400',
+    // Internship Feature 1 (phase 4) - the previous photo id
+    // (photos/1382735) was deleted upstream and returned a persistent 404 in
+    // the browser console. Replaced with a portrait URL verified to return
+    // HTTP 200. If this URL ever dies too, Radix <AvatarImage> automatically
+    // falls back to the <AvatarFallback> initial below - the UI never breaks.
+    avatar: 'https://images.pexels.com/photos/220453/pexels-photo-220453.jpeg?auto=compress&cs=tinysrgb&w=400',
     verified: true
   },
   {
@@ -34,14 +41,15 @@ const suggestions = [
   }
 ];
 
-export default function RightSidebar() {
+export default function RightSidebar({ onSubscribe }: { onSubscribe?: () => void }) {
+  const { t } = useLanguage();
   return (
     <div className="w-80 p-4 space-y-4">
       {/* Search */}
       <div className="relative">
         <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400 h-5 w-5" />
         <Input
-          placeholder="Search"
+          placeholder={t('sidebar.search')}
           className="pl-12 bg-gray-900 border-gray-800 text-white placeholder-gray-400 rounded-full py-3"
         />
       </div>
@@ -49,12 +57,19 @@ export default function RightSidebar() {
       {/* Subscribe to Premium */}
       <Card className="bg-gray-900 border-gray-800">
         <CardContent className="p-4">
-          <h3 className="text-white text-xl font-bold mb-2">Subscribe to Premium</h3>
+          <h3 className="text-white text-xl font-bold mb-2">{t('sidebar.subscribeTitle')}</h3>
           <p className="text-gray-400 text-sm mb-4">
-            Subscribe to unlock new features and if eligible, receive a share of revenue.
+            {t('sidebar.subscribeBody')}
           </p>
-          <Button className="bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-full">
-            Subscribe
+          {/* Internship Feature 1 (phase 4) - this button previously had NO
+              onClick, so clicking "Subscribe" did literally nothing. It now
+              navigates to the Subscription page through the same
+              `currentPage` state Mainlayout already uses. */}
+          <Button
+            className="bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-full"
+            onClick={onSubscribe}
+          >
+            {t('sidebar.subscribeButton')}
           </Button>
         </CardContent>
       </Card>
@@ -64,7 +79,7 @@ export default function RightSidebar() {
       {/* Who to follow */}
       <Card className="bg-gray-900 border-gray-800">
         <CardContent className="p-4">
-          <h3 className="text-white text-xl font-bold mb-4">You might like</h3>
+          <h3 className="text-white text-xl font-bold mb-4">{t('sidebar.youMightLike')}</h3>
           <div className="space-y-4">
             {suggestions.map((user) => (
               <div key={user.id} className="flex items-center justify-between">
@@ -91,13 +106,13 @@ export default function RightSidebar() {
                   variant="outline"
                   className="bg-white text-black hover:bg-gray-200 font-semibold rounded-full px-4"
                 >
-                  Follow
+                  {t('sidebar.follow')}
                 </Button>
               </div>
             ))}
           </div>
           <Button variant="ghost" className="text-blue-400 hover:text-blue-300 p-0 mt-4">
-            Show more
+            {t('sidebar.showMore')}
           </Button>
         </CardContent>
       </Card>
@@ -105,13 +120,13 @@ export default function RightSidebar() {
       {/* Footer */}
       <div className="p-4 text-xs text-gray-500 space-y-2">
         <div className="flex flex-wrap gap-x-3 gap-y-1">
-          <a href="#" className="hover:underline">Terms of Service</a>
-          <a href="#" className="hover:underline">Privacy Policy</a>
-          <a href="#" className="hover:underline">Cookie Policy</a>
-          <a href="#" className="hover:underline">Accessibility</a>
-          <a href="#" className="hover:underline">Ads info</a>
+          <a href="#" className="hover:underline">{t('sidebar.terms')}</a>
+          <a href="#" className="hover:underline">{t('sidebar.privacy')}</a>
+          <a href="#" className="hover:underline">{t('sidebar.cookies')}</a>
+          <a href="#" className="hover:underline">{t('sidebar.accessibility')}</a>
+          <a href="#" className="hover:underline">{t('sidebar.ads')}</a>
         </div>
-        <div>© 2024 X Corp.</div>
+        <div>{t('sidebar.copyright')}</div>
       </div>
     </div>
   );
