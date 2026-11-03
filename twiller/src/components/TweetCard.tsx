@@ -16,6 +16,9 @@ import axiosInstance from "@/lib/axiosInstance";
 // Internship Feature 5 - audio tweet playback. The stored reference
 // ("uploads/audio-1.wav") is resolved against the configured backend base.
 import { audioPlaybackUrl } from "@/lib/audioUpload";
+// A deleted author arrives as null and an un-expanded one as a bare id, so all
+// author fields go through one normaliser that can never return null.
+import { resolveTweetAuthor, authorInitial } from "@/lib/tweetAuthor";
 
 export default function TweetCard({ tweet }: any) {
   const { user } = useAuth();
@@ -52,6 +55,8 @@ export default function TweetCard({ tweet }: any) {
   };
   const isLiked = tweetstate.likedBy?.includes(user?._id);
   const isRetweet = tweetstate.retweetedBy?.includes(user?._id);
+  // Guarded author view: never null, with a fallback name and avatar.
+  const author = resolveTweetAuthor(tweetstate.author);
   return (
     <Card
       // Stable anchor so a clicked notification can scroll to and highlight
@@ -62,19 +67,20 @@ export default function TweetCard({ tweet }: any) {
       <CardContent className="p-4">
         <div className="flex space-x-3">
           <Avatar className="h-12 w-12">
-            <AvatarImage
-              src={tweetstate.author.avatar}
-              alt={tweetstate.author.displayName}
-            />
-            <AvatarFallback>{tweetstate.author.displayName}</AvatarFallback>
+            {/* Only request an image when one exists, so the fallback is
+                guaranteed to render for a missing/blank avatar. */}
+            {author.avatar ? (
+              <AvatarImage src={author.avatar} alt={author.displayName} />
+            ) : null}
+            <AvatarFallback>{authorInitial(author)}</AvatarFallback>
           </Avatar>
 
           <div className="flex-1 min-w-0">
             <div className="flex items-center space-x-2 mb-2">
               <span className="font-bold text-white">
-                {tweetstate.author.displayName}
+                {author.displayName}
               </span>
-              {tweetstate.author.verified && (
+              {author.verified && (
                 <div className="bg-blue-500 rounded-full p-0.5">
                   <svg
                     className="h-4 w-4 text-white fill-current"
@@ -85,7 +91,7 @@ export default function TweetCard({ tweet }: any) {
                 </div>
               )}
               <span className="text-gray-500">
-                @{tweetstate.author.username}
+                {author.username ? `@${author.username}` : ""}
               </span>
               <span className="text-gray-500">·</span>
               <span className="text-gray-500">

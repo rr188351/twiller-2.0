@@ -25,6 +25,8 @@ import NotificationSettings from "./NotificationSettings";
 import LoginHistory from "./LoginHistory";
 import axiosInstance from "@/lib/axiosInstance";
 import { OPEN_PROFILE_EDIT_EVENT } from "@/lib/profileEvents";
+// A deleted author populates to null, so ownership checks must be null-safe too.
+import { resolveTweetAuthor } from "@/lib/tweetAuthor";
 
 interface Tweet {
   id: string;
@@ -193,7 +195,9 @@ export default function ProfilePage() {
     fetchTweets();
   }, []);
   // Filter tweets by current user
-  const userTweets = tweets.filter((tweet: any) => tweet.author._id === user._id);
+  const userTweets = tweets.filter(
+    (tweet: any) => resolveTweetAuthor(tweet.author).id === String(user._id)
+  );
 
   return (
     <div className="min-h-screen">

@@ -86,7 +86,7 @@ const TweetComposer = ({ onTweetPosted, onAudioPosted }: any) => {
         <div className="flex space-x-4">
           <Avatar className="h-12 w-12">
             <AvatarImage src={user.avatar} alt={user.displayName} />
-            <AvatarFallback>{user.displayName[0]}</AvatarFallback>
+            <AvatarFallback>{user.displayName?.[0] || user.username?.[0] || "?"}</AvatarFallback>
           </Avatar>
 
           <div className="flex-1">

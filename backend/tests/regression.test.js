@@ -130,7 +130,18 @@ async function main() {
   check("tweet creation returns 201", post.status === 201, `got ${post.status}`);
   const tweetId = post.body?._id;
   check("tweet returns the original shape", Boolean(tweetId && post.body.content && post.body.likes === 0));
-  check("tweet author is the token's user", String(post.body?.author) === String(userId), JSON.stringify(post.body?.author));
+  check(
+    "tweet author is the token's user (expanded, like GET /post)",
+    String(post.body?.author?._id ?? post.body?.author) === String(userId),
+    JSON.stringify(post.body?.author)
+  );
+  check(
+    "created tweet author is renderable (name + avatar present)",
+    typeof post.body?.author?.displayName === "string" &&
+      post.body.author.displayName.length > 0 &&
+      typeof post.body.author.avatar === "string",
+    JSON.stringify(post.body?.author)
+  );
 
   console.log("\n[6] GET /post");
   const list = await call(BASE, "/post");

@@ -898,6 +898,9 @@ app.post("/post", requireFirebaseAuth, enforceMobileWindow, async (req, res) => 
       retweetedBy: [],
     });
     await tweet.save();
+    // Return the author EXPANDED, exactly like GET /post, so the client's
+    // optimistic insert renders the real name/avatar instead of a bare id.
+    await tweet.populate("author");
     return res.status(201).send(tweet);
   } catch (error) {
     return res.status(400).send({ error: error.message });
@@ -1088,10 +1091,31 @@ app.post("/subscription/payment", requireFirebaseAuth, async (req, res) => {
   }
 });
 // get all tweet
+//
+// A tweet whose author document no longer exists populates to `null`, which the
+// client cannot render ("Cannot read properties of null (reading 'avatar')").
+// Rather than create, reassign or delete any data, the API returns an explicit
+// placeholder author (id null) and LOGS how many tweets are orphaned so the
+// underlying data problem stays visible. Nothing is written to MongoDB.
+const ORPHAN_AUTHOR = { _id: null, username: "", displayName: "Unknown user", avatar: "", verified: false };
+function withSafeAuthor(tweet) {
+  const plain = tweet && typeof tweet.toObject === "function" ? tweet.toObject() : tweet;
+  if (plain && !plain.author) return { ...plain, author: { ...ORPHAN_AUTHOR } };
+  return plain;
+}
+
 app.get("/post", enforceMobileWindow, async (req, res) => {
   try {
-    const tweet = await Tweet.find().sort({ timestamp: -1 }).populate("author");
-    return res.status(200).send(tweet);
+    const tweets = await Tweet.find().sort({ timestamp: -1 }).populate("author");
+    const list = tweets.map(withSafeAuthor);
+    const orphaned = list.filter((t) => t.author && t.author._id === null).length;
+    if (orphaned > 0) {
+      // The count and the fact only - no user data, nothing fabricated.
+      console.warn(
+        `[post] ${orphaned} tweet(s) reference a missing author document; returning a placeholder author (no data changed).`
+      );
+    }
+    return res.status(200).send(list);
   } catch (error) {
     return res.status(400).send({ error: error.message });
   }
@@ -1122,6 +1146,9 @@ app.post("/like/:tweetid", requireFirebaseAuth, async (req, res) => {
       tweet.likedBy.push(userId);
       await tweet.save();
     }
+    // Expand the author exactly like GET /post, so the card keeps rendering the
+    // real name/avatar after a like instead of a bare id.
+    await tweet.populate("author");
     res.send(tweet);
   } catch (error) {
     return res.status(400).send({ error: error.message });
@@ -1152,6 +1179,8 @@ app.post("/retweet/:tweetid", requireFirebaseAuth, async (req, res) => {
       tweet.retweetedBy.push(userId);
       await tweet.save();
     }
+    // Same expansion as GET /post / like - never hand the client a bare id.
+    await tweet.populate("author");
     res.send(tweet);
   } catch (error) {
     return res.status(400).send({ error: error.message });
