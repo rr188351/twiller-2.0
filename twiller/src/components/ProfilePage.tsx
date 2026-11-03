@@ -106,10 +106,21 @@ const tweets: Tweet[] = [
   },
 ];
 export default function ProfilePage() {
-  const { user } = useAuth();
+  const {
+    user,
+    emailVerified,
+    resendVerificationEmail,
+    refreshEmailVerification,
+  } = useAuth();
   const [activeTab, setActiveTab] = useState("posts");
   const [showEditModal, setShowEditModal] = useState(false);
   const [tweets, setTweets] = useState<any>([]);
+  // Email-verification button state. Declared BEFORE the early return below so
+  // the hook order stays identical on every render.
+  const [verifyBusy, setVerifyBusy] = useState(false);
+  const [verifySent, setVerifySent] = useState(false);
+  const [verifyMessage, setVerifyMessage] = useState("");
+  const [verifyError, setVerifyError] = useState("");
   // Internship Feature 4 (phase 1).
   const { t } = useLanguage();
   const [loading, setloading] = useState(false);
@@ -124,6 +135,49 @@ export default function ProfilePage() {
   }, []);
 
   if (!user) return null;
+
+  /**
+   * Sends/resends Firebase's OWN verification email. The account can never be
+   * marked verified from here - only Firebase's trusted state can do that.
+   */
+  const handleVerifyEmail = async () => {
+    setVerifyBusy(true);
+    setVerifyMessage("");
+    setVerifyError("");
+    try {
+      const result = await resendVerificationEmail();
+      setVerifySent(true);
+      setVerifyMessage(
+        result === "already-verified"
+          ? t("profile.verifyEmailVerified")
+          : t("profile.verifyEmailSent")
+      );
+    } catch {
+      setVerifyError(t("profile.verifyEmailError"));
+    } finally {
+      setVerifyBusy(false);
+    }
+  };
+
+  /** Re-reads Firebase's verification state - no sign-out needed. */
+  const handleRecheckVerification = async () => {
+    setVerifyBusy(true);
+    setVerifyMessage("");
+    setVerifyError("");
+    try {
+      const verified = await refreshEmailVerification();
+      if (verified) {
+        setVerifyMessage(t("profile.verifyEmailThanks"));
+      } else {
+        setVerifyError(t("profile.verifyEmailNotVerified"));
+      }
+    } catch {
+      setVerifyError(t("profile.verifyEmailError"));
+    } finally {
+      setVerifyBusy(false);
+    }
+  };
+
   const fetchTweets = async () => {
     try {
       setloading(true);
@@ -224,6 +278,54 @@ export default function ProfilePage() {
         {user.bio && (
           <p className="text-white mb-3 leading-relaxed">{user.bio}</p>
         )}
+
+        {/* Email verification - sends Firebase's own verification LINK. It is
+            deliberately separate from Twiller's custom email OTP flow and can
+            never verify the account by itself. */}
+        <div className="mb-3 rounded-lg border border-gray-800 bg-gray-950 px-3 py-2">
+          <p className="text-sm text-gray-300">
+            {emailVerified
+              ? t("profile.verifyEmailVerified")
+              : t("profile.verifyEmailNotVerified")}
+          </p>
+          {!emailVerified && (
+            <div className="mt-2 flex flex-wrap items-center gap-3">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={verifyBusy}
+                onClick={handleVerifyEmail}
+                className="border-gray-600 text-white bg-gray-950 font-semibold rounded-full px-4 disabled:opacity-60"
+              >
+                {verifyBusy
+                  ? t("forgot.verifying")
+                  : verifySent
+                    ? t("profile.verifyEmailResendBtn")
+                    : t("profile.verifyEmailBtn")}
+              </Button>
+              {verifySent && (
+                <button
+                  type="button"
+                  disabled={verifyBusy}
+                  onClick={handleRecheckVerification}
+                  className="text-xs text-blue-400 hover:text-blue-300 font-medium disabled:opacity-60"
+                >
+                  {t("profile.verifyEmailRecheck")}
+                </button>
+              )}
+            </div>
+          )}
+          {verifyMessage && (
+            <p role="status" className="mt-1 text-xs text-green-400">
+              {verifyMessage}
+            </p>
+          )}
+          {verifyError && (
+            <p role="alert" className="mt-1 text-xs text-red-400">
+              {verifyError}
+            </p>
+          )}
+        </div>
 
         <div className="flex items-center space-x-4 text-gray-400 text-sm mb-3">
           <div className="flex items-center space-x-1">

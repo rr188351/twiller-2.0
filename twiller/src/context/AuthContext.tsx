@@ -56,6 +56,10 @@ interface AuthContextType {
   }) => Promise<void>;
   logout: () => void;
   isLoading: boolean;
+  // Firebase's OWN email-verification state (never a client-supplied flag).
+  emailVerified: boolean;
+  resendVerificationEmail: () => Promise<"sent" | "already-verified">;
+  refreshEmailVerification: () => Promise<boolean>;
   googlesignin: () => void;
   // Internship Feature 1 (phase 4) - refetch the server profile so the UI
   // shows a newly activated plan without a full page reload.
@@ -153,12 +157,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 }) => {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  // Trusted email-verification state, read ONLY from the signed-in Firebase
+  // user (and re-read after reload()). The backend profile and any
+  // client-supplied flag are deliberately ignored.
+  const [emailVerified, setEmailVerified] = useState(false);
 
   useEffect(() => {
     // Check for existing session. The interceptor attaches the Firebase ID
     // token, so the backend resolves the profile from the VERIFIED token
     // (UID-first, verified-email fallback) - never from a client email param.
     const unsubcribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      setEmailVerified(Boolean(firebaseUser?.emailVerified));
       if (firebaseUser?.email) {
         try {
           const res = await axiosInstance.get("/loggedinuser");
@@ -364,6 +373,42 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       setIsLoading(false);
     }
   };
+  /**
+   * Sends (or re-sends) Firebase's OWN email-verification link for the signed-in
+   * account. It never marks anything verified - `emailVerified` can only become
+   * true from Firebase's trusted state after the user opens the emailed link.
+   * When Firebase already reports the address as verified nothing is sent.
+   */
+  const resendVerificationEmail = async (): Promise<"sent" | "already-verified"> => {
+    const current = auth.currentUser;
+    if (!current) {
+      throw new Error("You must be signed in to verify your email address.");
+    }
+    // Re-read Firebase's authoritative state first, so an already-verified
+    // account never receives a pointless email.
+    await current.reload();
+    if (current.emailVerified) {
+      setEmailVerified(true);
+      return "already-verified";
+    }
+    await sendEmailVerification(current);
+    return "sent";
+  };
+
+  /**
+   * Re-reads Firebase's verification state so the UI can update after the user
+   * opens the link, WITHOUT signing out. Read-only: it can never set the flag,
+   * and it trusts no client-supplied value.
+   */
+  const refreshEmailVerification = async (): Promise<boolean> => {
+    const current = auth.currentUser;
+    if (!current) return false;
+    await current.reload();
+    const verified = Boolean(current.emailVerified);
+    setEmailVerified(verified);
+    return verified;
+  };
+
   const googlesignin = async () => {
     setIsLoading(true);
 
@@ -422,6 +467,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         updateProfile,
         logout,
         isLoading,
+        emailVerified,
+        resendVerificationEmail,
+        refreshEmailVerification,
         googlesignin,
         refreshUser,
       }}
