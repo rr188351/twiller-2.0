@@ -343,6 +343,11 @@ async function sectionC() {
 
   const r = await s.api("/auth/language/otp/request", { method: "POST", body: { targetLocale: "fr" }, token: tok });
   check("C1 email outage -> 502 delivery-failed, no devCode", r.status === 502 && r.body && r.body.code === "delivery-failed" && !("devCode" in (r.body || {})), JSON.stringify(r));
+  check(
+    "C1b failure response propagates provider + reason (actionable in production)",
+    typeof r.body?.provider === "string" && r.body.provider.length > 0 && typeof r.body?.reason === "string" && r.body.reason.length > 0,
+    JSON.stringify(r)
+  );
 
   // Production soft-retires the undelivered code (status -> "consumed") rather
   // than deleting it, preserving an audit row that can never verify (verify

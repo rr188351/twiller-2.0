@@ -23,12 +23,90 @@
  *    never be written to the log file.
  */
 
-/** Env vars the real SMTP adapter requires (names only - never values). */
-export const SMTP_REQUIRED_ENV = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "MAIL_FROM"];
+/**
+ * Env vars the real SMTP adapter cannot work WITHOUT (names only - never
+ * values). SMTP_PORT and SMTP_SECURE are deliberately NOT required: both have
+ * correct, self-consistent defaults (see smtpTransportOptions). Requiring them
+ * turned a perfectly valid configuration into a hard "not configured" failure,
+ * which is indistinguishable from a provider outage.
+ */
+export const SMTP_REQUIRED_ENV = ["SMTP_HOST", "SMTP_USER", "SMTP_PASS", "MAIL_FROM"];
+
+/** Default submission port (STARTTLS) and the implicit-TLS port. */
+export const SMTP_DEFAULT_PORT = 587;
+export const SMTP_IMPLICIT_TLS_PORT = 465;
 
 /** Configured sender address (call time, so tests can override it). */
 function mailFrom() {
   return process.env.MAIL_FROM || "Twiller <no-reply@twiller.local>";
+}
+
+/** Tolerant parser for switch-style env values ("true", "TRUE", "1", "yes", "on"). */
+export function envFlag(value) {
+  return ["true", "1", "yes", "on"].includes(String(value ?? "").trim().toLowerCase());
+}
+
+/**
+ * Builds the nodemailer transport options, keeping port and TLS mode
+ * CONSISTENT when the operator configures only one of SMTP_PORT /
+ * SMTP_SECURE.
+ *
+ *   SMTP_PORT set        -> that port wins (explicit configuration)
+ *   SMTP_PORT unset      -> 465 when SMTP_SECURE is truthy, else 587
+ *   SMTP_SECURE unset    -> derived: true only for port 465
+ *
+ * This prevents the classic "implicit TLS on the submission port" mix-up
+ * (587 + secure:true), which cannot connect and surfaces as a generic
+ * delivery failure instead of a precise configuration error.
+ */
+export function smtpTransportOptions() {
+  const rawPort = String(process.env.SMTP_PORT ?? "").trim();
+  const parsedPort = Number(rawPort);
+  const hasPort = rawPort !== "" && Number.isFinite(parsedPort) && parsedPort > 0;
+  const hasSecureFlag = String(process.env.SMTP_SECURE ?? "").trim() !== "";
+  const secureFlag = envFlag(process.env.SMTP_SECURE);
+
+  const port = hasPort
+    ? parsedPort
+    : secureFlag
+      ? SMTP_IMPLICIT_TLS_PORT
+      : SMTP_DEFAULT_PORT;
+  const secure = hasSecureFlag ? secureFlag : port === SMTP_IMPLICIT_TLS_PORT;
+
+  // Name the two combinations that can never work, instead of hiding them
+  // behind a timeout. Values logged are ports/booleans - never secrets.
+  if (port === SMTP_IMPLICIT_TLS_PORT && hasSecureFlag && !secureFlag) {
+    console.warn(
+      `[mailer] SMTP_PORT=${port} requires SMTP_SECURE=true (implicit TLS). The current combination cannot connect.`
+    );
+  }
+  if (port === SMTP_DEFAULT_PORT && secureFlag) {
+    console.warn(
+      `[mailer] SMTP_PORT=${port} with SMTP_SECURE=true is inconsistent (587 uses STARTTLS). Set SMTP_PORT=465 or SMTP_SECURE=false.`
+    );
+  }
+
+  return {
+    host: process.env.SMTP_HOST,
+    port,
+    secure,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+  };
+}
+
+/** Strips anything sensitive from a value before it reaches a log line. */
+export function redact(text) {
+  return String(text ?? "")
+    .replace(/[\w.+-]+@[\w.-]+/g, "<email>")
+    .replace(/\b[A-Za-z0-9_\-+/=]{16,}\b/g, "<redacted>");
+}
+
+/** Logs a delivery failure with NO secrets (mode, provider and redacted reason). */
+function logDeliveryFailure(mode, error) {
+  console.error(`[mailer] email delivery failed (mode=${mode}): ${redact(error)}`);
 }
 
 /**
@@ -138,21 +216,17 @@ async function deliverViaSmtp({ to, subject, body }) {
   }
 
   try {
-    const transport = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT || 587),
-      secure: String(process.env.SMTP_SECURE) === "true",
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
-    });
-
+    const options = smtpTransportOptions();
+    const transport = nodemailer.createTransport(options);
     await transport.sendMail({ from: mailFrom(), to, subject, text: body });
     return { delivered: true, status: "sent", provider: "smtp" };
   } catch (error) {
-    // error.message could contain credentials, so keep it generic in logs.
-    console.error("[mailer] SMTP delivery failed:", error?.message || "unknown error");
+    // Log the transport facts (host/port/secure) plus a redacted reason, so a
+    // production failure is diagnosable without a second round trip. No
+    // credential, address or OTP can reach this line.
+    console.error(
+      `[mailer] SMTP delivery failed (host=${process.env.SMTP_HOST}, port=${smtpTransportOptions().port}, secure=${smtpTransportOptions().secure}): ${redact(error?.message || "unknown error")}`
+    );
     return { delivered: false, status: "failed", provider: "smtp", error: "SMTP delivery failed" };
   }
 }
@@ -203,6 +277,13 @@ export async function sendMail({ to, subject, body, kind = "generic", devCode })
         `Email delivery is not configured. Set OTP_DELIVERY=smtp and ` +
         `${SMTP_REQUIRED_ENV.join(", ")}.`,
     };
+  }
+
+  // A failed delivery is logged with the mode and a REDACTED reason so the
+  // incident is diagnosable from the server logs (the API response also carries
+  // `reason`, which is what makes a production failure actionable).
+  if (!result.delivered) {
+    logDeliveryFailure(mode, result.error);
   }
 
   // Never echo the secret back to the client in production.
@@ -274,4 +355,6 @@ export default {
   mailerConfig,
   resolveMailMode,
   missingSmtpEnv,
+  smtpTransportOptions,
+  redact,
 };

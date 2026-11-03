@@ -24,7 +24,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { sendMail, resolveMailMode, missingSmtpEnv, SMTP_REQUIRED_ENV } from "../utils/mailer.js";
+import {
+  sendMail,
+  resolveMailMode,
+  missingSmtpEnv,
+  SMTP_REQUIRED_ENV,
+  smtpTransportOptions,
+  redact,
+} from "../utils/mailer.js";
 // Shared stub: the configured path runs against a local SMTP server, so no
 // real mail and no credentials are involved (see tests/helpers/smtpStub.js).
 import { startSmtpStub, closedPort } from "./helpers/smtpStub.js";
@@ -227,6 +234,76 @@ async function main() {
   }
   check("no SMS/Twilio reference anywhere in backend source", offenders.length === 0, offenders.join(", "));
   check("backend/utils/sms.js has been deleted", !fs.existsSync(path.join(BACKEND_ROOT, "utils", "sms.js")));
+
+  /* ---------------------------------------------------------------- */
+  console.log("\n[7] SMTP transport options stay self-consistent");
+  await withEnv(noSmtpEnv({ SMTP_SECURE: undefined }), async () => {
+    const o = smtpTransportOptions();
+    check(
+      "no SMTP_PORT + no SMTP_SECURE -> 587 + STARTTLS (never implicit TLS on 587)",
+      o.port === 587 && o.secure === false,
+      JSON.stringify({ port: o.port, secure: o.secure })
+    );
+  });
+  await withEnv(noSmtpEnv({ SMTP_SECURE: "true" }), async () => {
+    const o = smtpTransportOptions();
+    check(
+      "SMTP_SECURE=true WITHOUT SMTP_PORT -> 465 + implicit TLS (previously a hard 'not configured' failure)",
+      o.port === 465 && o.secure === true,
+      JSON.stringify({ port: o.port, secure: o.secure })
+    );
+  });
+  await withEnv(noSmtpEnv({ SMTP_SECURE: "True" }), async () => {
+    check("SMTP_SECURE parsing is case-insensitive", smtpTransportOptions().secure === true);
+  });
+  await withEnv(noSmtpEnv({ SMTP_SECURE: "on" }), async () => {
+    check('SMTP_SECURE="on" counts as true', smtpTransportOptions().secure === true);
+  });
+  await withEnv(noSmtpEnv({ SMTP_PORT: "465", SMTP_SECURE: "false" }), async () => {
+    const o = smtpTransportOptions();
+    check(
+      "an explicit SMTP_PORT always wins over derivation",
+      o.port === 465 && o.secure === false,
+      JSON.stringify({ port: o.port, secure: o.secure })
+    );
+  });
+  await withEnv(noSmtpEnv({ SMTP_PORT: "587", SMTP_SECURE: undefined }), async () => {
+    const o = smtpTransportOptions();
+    check("SMTP_PORT=587 with SMTP_SECURE unset -> STARTTLS", o.port === 587 && o.secure === false);
+  });
+  await withEnv(noSmtpEnv({ SMTP_SECURE: "true" }), async () => {
+    check("SMTP_PORT is no longer a required variable", !SMTP_REQUIRED_ENV.includes("SMTP_PORT"));
+    check(
+      "a secure-only configuration is not reported as missing configuration",
+      missingSmtpEnv().length === SMTP_REQUIRED_ENV.length && !missingSmtpEnv().includes("SMTP_PORT")
+    );
+  });
+
+  /* ---------------------------------------------------------------- */
+  console.log("\n[8] Failure logging is redacted and OTP-free");
+  {
+    const lines = [];
+    const original = console.error;
+    console.error = (...args) => lines.push(args.join(" "));
+    try {
+      await withEnv(noSmtpEnv({ OTP_DELIVERY: "smtp", NODE_ENV: "production" }), async () => {
+        await sendMail({
+          to: "incident.user@example.com",
+          subject: "s",
+          body: "Your Twiller verification code is 654321.",
+          devCode: "654321",
+        });
+      });
+    } finally {
+      console.error = original;
+    }
+    const joined = lines.join("\n");
+    check("a failed delivery is logged with its mode", joined.includes("[mailer] email delivery failed"), joined.slice(0, 200));
+    check("the OTP never reaches the log", !joined.includes("654321"));
+    check("the recipient address never reaches the log", !joined.includes("incident.user@example.com"));
+    check("the log names the MISSING variables instead", joined.includes("SMTP_HOST"), joined.slice(0, 300));
+    check("redact() masks addresses and long secrets", !redact("x user@example.com y").includes("user@example.com") && !redact("token abcdefghijklmnopqrstuvwx").includes("abcdefghijklmnopqrstuvwx"));
+  }
 
   console.log("\n==================================================");
   console.log(`  passed: ${passed}   failed: ${failed}`);
