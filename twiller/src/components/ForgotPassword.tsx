@@ -52,6 +52,7 @@ type Step = "identify" | "verify" | "new-password" | "done";
 export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps) {
   const [step, setStep] = useState<Step>("identify");
   const [identifier, setIdentifier] = useState("");
+  const [channel, setChannel] = useState<"email" | null>(null);
   const [otp, setOtp] = useState("");
   const [recoveryToken, setRecoveryToken] = useState<string | null>(null);
   const [resetCode, setResetCode] = useState("");
@@ -78,6 +79,7 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
   const reset = () => {
     setStep("identify");
     setIdentifier("");
+    setChannel(null);
     setOtp("");
     setRecoveryToken(null);
     setResetCode("");
@@ -110,16 +112,17 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
         identifier: identifier.trim(),
       });
 
-      // The backend deliberately hides whether the account exists: an unknown
-      // address gets the same generic message and no code is emailed.
+      // The backend deliberately hides whether the account exists.
       if (res.data?.devHint) setDevHint(res.data.devHint);
 
       if (res.data?.channel === "email") {
-        setInfo(res.data.message || t("forgot.infoGeneric"));
-        if (res.data?.devCode) {
-          setDevHint(`Development mode - your verification code is ${res.data.devCode}`);
-        }
-        setStep("verify");
+        setChannel("email");
+        // Firebase sends the real reset email from the browser. The reset LINK
+        // completes the change on Firebase's own secure page, so this widget
+        // must NOT ask for a code or a new password for the email channel.
+        await sendPasswordResetEmail(auth, identifier.trim(), actionCodeSettings);
+        setInfo("");
+        setStep("done");
         return;
       }
 
@@ -229,12 +232,16 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
     }
   };
 
-  // Email is the only channel, so every recovery run uses all three steps.
-  const stepLabels: Array<{ key: Step; label: string }> = [
-    { key: "identify", label: t("forgot.step1Label") },
-    { key: "verify", label: t("forgot.step2Label") },
-    { key: "new-password", label: t("forgot.step3Label") },
-  ];
+  // The EMAIL flow ends at "identify" (Firebase's reset link does the rest), so
+  // only that step is shown.
+  const stepLabels: Array<{ key: Step; label: string }> =
+    channel === "email"
+      ? [{ key: "identify", label: t("forgot.step1Label") }]
+      : [
+          { key: "identify", label: t("forgot.step1Label") },
+          { key: "verify", label: t("forgot.step2Label") },
+          { key: "new-password", label: t("forgot.step3Label") },
+        ];
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
@@ -279,10 +286,12 @@ export default function ForgotPassword({ isOpen, onClose }: ForgotPasswordProps)
             <div className="space-y-4 text-center py-4">
               <ShieldCheck className="h-12 w-12 text-green-500 mx-auto" />
               <p className="text-white font-semibold">
-                {t("forgot.checkInbox")}
+                {channel === "email" ? t("forgot.checkInbox") : t("forgot.doneTitle")}
               </p>
               <p className="text-sm text-gray-400">
-                {t("pwreset.emailSentMessage")}
+                {channel === "email"
+                  ? t("pwreset.emailSentMessage")
+                  : t("forgot.doneMessage")}
               </p>
               <Button
                 className="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-full"

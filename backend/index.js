@@ -1271,57 +1271,27 @@ app.post("/auth/forgot-password/request", async (req, res) => {
       });
     }
 
-    // ---- EMAIL CHANNEL: generate, hash and email a 6-digit OTP ----
-    // The code goes to the address on the account through the same mailer used
-    // by every other OTP flow. Firebase's own reset link is requested by the
-    // browser only AFTER this code is verified, so the two proofs agree.
+    // ---- EMAIL CHANNEL (Firebase-sent) ----
+    // Firebase performs the actual reset-email delivery from the browser
+    // (sendPasswordResetEmail). Here we only record the request so the daily
+    // limit is enforced server-side and the attempt is auditable. Nothing here
+    // depends on the host being able to send outbound mail, which is what keeps
+    // password recovery working on hosts whose SMTP egress is blocked.
     const channel = "email";
-    const otp = generateOtp();
-    const { hash, salt } = hashSecret(otp);
-    const otpExpiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000);
 
     await PasswordReset.create({
       user: user._id,
-      identifier,
+      identifier: user.email,
       channel,
       status: "pending",
       dailyRequestDate: today,
-      otpHash: hash,
-      otpSalt: salt,
-      otpExpiresAt,
     });
 
-    const result = await sendMail({
-      kind: "password-reset-otp",
-      to: user.email,
-      subject: "Your Twiller password reset code",
-      body: `Your Twiller verification code is ${otp}. It expires in ${OTP_TTL_MINUTES} minutes. Do not share it with anyone.`,
-      devCode: otp,
-    });
-
-    if (!result.delivered) {
-      return res.status(502).send({
-        error: "The verification code could not be delivered. Please try again in a moment.",
-        code: "delivery-failed",
-        deliveryStatus: "failed",
-        provider: result.provider,
-        reason: result.error,
-      });
-    }
-
-    const isMock = result.status === "mock";
     return res.status(200).send({
       ok: true,
       channel,
-      message: isMock
-        ? "Development mock: no real email was sent."
-        : `A ${OTP_TTL_MINUTES} minute verification code has been sent to ${user.email}.`,
+      message: `We have sent a password reset link to ${user.email}. Check your inbox.`,
       expiresInMinutes: OTP_TTL_MINUTES,
-      delivered: result.delivered,
-      deliveryStatus: result.status,
-      provider: result.provider,
-      // devCode is attached by sendMail ONLY when NODE_ENV !== "production".
-      ...(result.devCode ? { devCode: result.devCode } : {}),
     });
   } catch (error) {
     return res.status(400).send({ error: error.message });

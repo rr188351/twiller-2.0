@@ -113,88 +113,50 @@ async function main() {
   check('first request succeeds (200)', r1.status === 200, 'got ' + r1.status);
   check('channel is email', r1.body?.channel === 'email');
   check('a user-facing message is returned', Boolean(r1.body?.message));
-  check('a 6-digit code is emailed for the email channel (dev mock)', /^\d{6}$/.test(r1.body?.devCode || ''), JSON.stringify(r1.body?.devCode));
+  check('NO backend-issued code is returned (Firebase emails the reset link)', !('devCode' in (r1.body || {})), JSON.stringify(r1.body?.devCode));
 
   console.log('\\n[2] DAILY LIMIT - second request on the same IST day');
   const r2 = await api('/auth/forgot-password/request', { method: 'POST', body: { identifier: emailA } });
   check('daily limit respected (429)', r2.status === 429, 'got ' + r2.status);
 
-  console.log('\n[3] EMAIL channel - request recovery (no OTP verification needed for email)');
+  console.log('\n[3] EMAIL channel uses FIREBASE - the backend issues no code of its own');
   const r3 = await api('/auth/forgot-password/verify-otp', { method: 'POST', body: { identifier: emailA, otp: '123456' } });
-  check('email verify-otp refused (401 incorrect code)', r3.status === 401, 'got ' + r3.status);
-  check('no recovery token is issued for the email channel', !r3.body?.recoveryToken);
-
-  console.log('\\n[4] EMAIL channel - request recovery');
-  const phoneB = emailB; // email is the only OTP channel now
-  const r4 = await api('/auth/forgot-password/request', { method: 'POST', body: { identifier: phoneB } });
-  check('phone request succeeds (200)', r4.status === 200, 'got ' + r4.status);
-  check('the email channel is reported as "email"', r4.body?.channel === 'email', JSON.stringify(r4.body?.channel));
-  check('a 6-digit code is issued for the email channel', /^\d{6}$/.test(r4.body?.devCode || ''), JSON.stringify(r4.body?.devCode));
-
-  console.log('\\n[5] EMAIL channel - verify OTP with the correct code');
-  const r5 = await api('/auth/forgot-password/verify-otp', { method: 'POST', body: { identifier: phoneB, otp: r4.body?.devCode } });
-  check('phone verify-otp succeeds (200)', r5.status === 200, 'got ' + r5.status + ' ' + JSON.stringify(r5.body));
-  check('verification reports ok', r5.body?.ok === true);
-
-  const recoveryToken = r5.body?.recoveryToken;
-  console.log('\\n[6] OTP - correct code issues a recovery token');
-  check('a recovery token is issued', typeof recoveryToken === 'string' && recoveryToken.length >= 32);
-
-  console.log('\\n[7] complete - no recovery token is refused');
-  const r7 = await api('/auth/forgot-password/complete', { method: 'POST', body: { identifier: phoneB, password: 'Pass1234' } });
-  check('no recovery token is rejected (401)', r7.status === 401, 'got ' + r7.status);
-
-  const r9 = await api('/auth/forgot-password/complete', { method: 'POST', body: { identifier: phoneB, password: 'AlphaBetaGammaReset', recoveryToken: 'f'.repeat(64) } });
-  check('bad recovery token is rejected (401)', r9.status === 401, 'got ' + r9.status);
-
-  console.log('\\n[8] COMPLETE - valid password with recovery token');
-  // The assignment allows LETTERS ONLY - no digits, no symbols.
-  const newPassword = 'AlphaBetaGammaReset';
-
-  const r8a = await api('/auth/forgot-password/complete', { method: 'POST', body: { identifier: phoneB, password: 'Reset' + stamp, recoveryToken } });
-  check('digits in the password are refused (400 letters-only)', r8a.status === 400 && r8a.body?.policy === 'letters-only', 'got ' + r8a.status + ' ' + JSON.stringify(r8a.body));
-
-  const r8 = await api('/auth/forgot-password/complete', { method: 'POST', body: { identifier: phoneB, password: newPassword, recoveryToken } });
-  check('reset is recorded (200)', r8.status === 200, 'got ' + r8.status + ' ' + JSON.stringify(r8.body));
-  check('IST timestamp is returned', /IST/.test(r8.body?.istTime || ''));
-
-  console.log('\\n[9] COMPLETE - invalid recovery token is refused');
-  // NOTE: the bad-token check runs BEFORE the successful completion below -
-  // once a record is completed the API answers 409 before it inspects the
-  // token, so the 401 case must be exercised while the record is "verified".
-
-  console.log('\\n[10] COMPLETE - valid letters-only password succeeds');
-  const r10 = await api('/auth/forgot-password/complete', { method: 'POST', body: { identifier: phoneB, password: 'AnotherLettersOnly', recoveryToken } });
-  check('re-using a completed session is refused (409)', r10.status === 409, 'got ' + r10.status);
-
-  console.log('\\n[11] REPLAY - a completed request cannot be reused');
-  const r11 = await api('/auth/forgot-password/complete', { method: 'POST', body: { identifier: phoneB, password: newPassword, recoveryToken } });
-  check('replay is blocked (409)', r11.status === 409, 'got ' + r11.status);
-
-  console.log('\\n[12] STORAGE - no plaintext password or OTP in MongoDB');
+  check('no backend-issued OTP can be verified (401)', r3.status === 401, 'got ' + r3.status + ' ' + JSON.stringify(r3.body));
+  check('no recovery token is issued', !r3.body?.recoveryToken);
   if (MONGO_URL) {
-    const record = await PasswordReset.findOne({ identifier: phoneB }).sort({ requestedAt: -1 });
-    check('OTP hash destroyed after verification', record?.otpHash === null);
-    check('recovery token hash destroyed after completion', record?.recoveryTokenHash === null);
-    check('status is completed', record?.status === 'completed');
-    check('a salted password FINGERPRINT is stored', typeof record?.appliedPasswordHash === 'string' && record.appliedPasswordHash.length === 64);
-    const serialised = JSON.stringify(record);
-    check('plaintext password is NOT stored', !serialised.includes(newPassword));
-    check('plaintext OTP is NOT stored', !serialised.includes('123456'));
+    const rec = await PasswordReset.findOne({ identifier: emailA }).sort({ requestedAt: -1 });
+    check('the audit row for the daily limit exists', Boolean(rec), 'no PasswordReset row');
+    check('NO OTP hash/salt is stored (Firebase owns the code)', !rec?.otpHash && !rec?.otpSalt, JSON.stringify({ otpHash: rec?.otpHash, otpSalt: rec?.otpSalt }));
+    check('the row carries no verified/recovery state', rec?.status === 'pending' && !rec?.recoveryTokenHash, JSON.stringify({ status: rec?.status }));
   } else {
     console.log('  SKIP  no MONGO_URL - storage assertions skipped');
   }
 
-  console.log('\\n[13] EXPIRY - an expired OTP is refused by the server');
+  console.log('\n[4] the email-only identifier rule is enforced');
+  const r4 = await api('/auth/forgot-password/request', { method: 'POST', body: { identifier: '919876543210' } });
+  check('a phone identifier is rejected (400 email-required)', r4.status === 400 && r4.body?.code === 'email-required', 'got ' + r4.status + ' ' + JSON.stringify(r4.body));
+
+  console.log('\n[5] an unknown account leaks nothing');
+  const r5 = await api('/auth/forgot-password/request', { method: 'POST', body: { identifier: 'ghost.' + stamp + '@twiller.test' } });
+  check('unknown account answers the generic 200', r5.status === 200 && r5.body?.ok === true, 'got ' + r5.status + ' ' + JSON.stringify(r5.body));
+  check('the generic body claims no channel and no delivery', !('channel' in (r5.body || {})) && !('deliveryStatus' in (r5.body || {})), JSON.stringify(r5.body));
+
+  console.log('\n[6] STORAGE - password recovery stores no secrets');
   if (MONGO_URL) {
-    const phoneD = emailD; // email is the only OTP channel now
-    await register('fp_d_' + stamp, emailD, phoneD, tokenFor('d'));
-    await api('/auth/forgot-password/request', { method: 'POST', body: { identifier: phoneD } });
-    await PasswordReset.updateOne({ identifier: phoneD }, { otpExpiresAt: new Date(Date.now() - 60 * 1000) });
-    const r13 = await api('/auth/forgot-password/verify-otp', { method: 'POST', body: { identifier: phoneD, otp: '123456' } });
-    check('expired OTP is rejected (410)', r13.status === 410, 'got ' + r13.status);
-    check('expiry message is clear', /expired/i.test(r13.body?.error || ''));
+    const rec = await PasswordReset.findOne({ identifier: emailA }).sort({ requestedAt: -1 });
+    const serialised = JSON.stringify(rec || {});
+    check('no plaintext OTP is stored', !/\b\d{6}\b/.test(serialised), serialised.slice(0, 200));
+    check('no recovery-token hash is stored', !rec?.recoveryTokenHash, String(rec?.recoveryTokenHash));
+    check('no password fingerprint is stored', !rec?.appliedPasswordHash, String(rec?.appliedPasswordHash));
+  } else {
+    console.log('  SKIP  no MONGO_URL - storage assertions skipped');
   }
+
+  console.log('\n[7] COMPLETE still refuses a request without a verified recovery session');
+  const r7 = await api('/auth/forgot-password/complete', { method: 'POST', body: { identifier: emailA, password: 'Pass1234' } });
+  check('no recovery token is rejected (401)', r7.status === 401, 'got ' + r7.status);
+  const r9 = await api('/auth/forgot-password/complete', { method: 'POST', body: { identifier: emailA, password: 'AlphaBetaGammaReset', recoveryToken: 'f'.repeat(64) } });
+  check('a forged recovery token is rejected (401)', r9.status === 401, 'got ' + r9.status);
 
   console.log('\\n[14] HISTORY - audit trail is readable and leak-free');
   const r14 = await api('/auth/forgot-password/history?email=' + encodeURIComponent(emailA));
@@ -211,6 +173,37 @@ async function main() {
     }
   }
   check('per-IP rate limiter returns 429', limited, 'never rate limited');
+
+  console.log('\n[16] REGRESSION GUARD - password recovery works with outbound SMTP UNREACHABLE');
+  {
+    // Reproduces the production condition (SMTP egress blocked/unreachable):
+    // password recovery must STILL answer 200 because Firebase sends the link.
+    const offline = await startTestServer({
+      fbMock: true,
+      port: 5096,
+      env: {
+        OTP_DELIVERY: 'smtp',
+        SMTP_HOST: '127.0.0.1',
+        SMTP_PORT: '1',
+        SMTP_SECURE: 'false',
+        MAIL_FROM: 'Twiller <no-reply@twiller.test>',
+      },
+    });
+    const offlineEmail = 'offline.' + stamp + '@twiller.test';
+    const offlineTok = 'fp-tok-offline-' + stamp;
+    offline.setMap({ [offlineTok]: { uid: 'fp-uid-offline-' + stamp, email: offlineEmail, email_verified: true } });
+    const regOffline = await offline.api('/register', {
+      method: 'POST',
+      token: offlineTok,
+      body: { username: 'fp_offline_' + stamp, displayName: 'offline', avatar: 'https://example.com/a.png', email: offlineEmail, phone: '' },
+    });
+    check('offline fixture registers', regOffline.status === 201, 'got ' + regOffline.status);
+    const rOffline = await offline.api('/auth/forgot-password/request', { method: 'POST', body: { identifier: offlineEmail } });
+    check('recovery request still returns 200 with SMTP unreachable', rOffline.status === 200, 'got ' + rOffline.status + ' ' + JSON.stringify(rOffline.body));
+    check('it reports the email channel', rOffline.body?.channel === 'email', JSON.stringify(rOffline.body));
+    check('it claims no delivery status (Firebase sends the link)', !('deliveryStatus' in (rOffline.body || {})) && !('provider' in (rOffline.body || {})), JSON.stringify(rOffline.body));
+    await offline.stop();
+  }
 
   if (MONGO_URL) await mongoose.disconnect();
   await removeTestFixtures(server.mongoUrl, ['fp\\.'], []);

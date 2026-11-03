@@ -63,21 +63,25 @@ Function. It needs its own Node service.
 - No browser console error mentions `localhost`.
 - Switching language sends an **email** OTP for every locale (check the inbox).
 
-## 4. OTP delivery — EMAIL ONLY
+## 4. Email delivery — who sends what
 
-Twiller sends **every** one-time code by email: language switching, sign-in
-verification and password recovery. The mobile/SMS channel has been removed from
-the product (`backend/utils/sms.js` and all `SMS_*` variables are gone), so there
-is no locale-to-channel mapping and no SMS/Twilio configuration.
+The mobile/SMS channel has been removed from the product (`backend/utils/sms.js`
+and all `SMS_*` variables are gone): there is no locale-to-channel mapping, no
+SMS/Twilio configuration, and **no phone number is required** for any code.
 
-| Flow | Destination |
-|---|---|
-| Language switch (any locale: `fr`, `en`, `hi`, `es`, `pt`, `zh`) | the account's email address |
-| Chrome sign-in code | the account's email address |
-| Audio-upload code | the account's email address |
-| Password recovery | the account's email address (emailed OTP, then Firebase's reset email) |
+| Flow | Who sends it | Needs backend SMTP? |
+|---|---|---|
+| Signup / profile email verification | **Firebase** (`sendEmailVerification`) | no |
+| Password recovery | **Firebase** (`sendPasswordResetEmail`, requested by the browser) | no |
+| Language switch (any locale: `fr`, `en`, `hi`, `es`, `pt`, `zh`) | Twiller backend (`utils/mailer.js`) | yes |
+| Chrome sign-in code | Twiller backend (`utils/mailer.js`) | yes |
+| Audio-upload code | Twiller backend (`utils/mailer.js`) | yes |
+| Subscription invoice | Twiller backend (`utils/mailer.js`) | yes |
 
-**No phone number is ever required** to send or verify a code.
+Firebase-sent mail works on **any** host because it never leaves Google's
+servers. The backend-sent mail needs outbound SMTP, which some hosts block (e.g.
+Render's Free plan blocks ports 25/465/587). On such a host those four flows
+answer `502 delivery-failed` with the reason instead of pretending to have sent.
 
 ## 5. Provider configuration checklist (Render)
 
