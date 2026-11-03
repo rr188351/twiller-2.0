@@ -10,7 +10,7 @@ import AudioOtp from "./models/audiootp.js";
 import { sendMail, exposeDevCode } from "./utils/mailer.js";
 // Selects the application database explicitly so an empty URI path can never
 // make the driver fall back to its default `test` database (see the module).
-import { resolveDatabaseName } from "./utils/dbName.js";
+import { resolveDatabaseName, assertProductionDatabaseName, sanitizeMongoHost } from "./utils/dbName.js";
 import {
   generateOtp,
   generateSecureToken,
@@ -134,15 +134,23 @@ const url = process.env.MONOGDB_URL || process.env.MONGODB_URL;
 // resolver keeps any database name already present in the URI (test isolation)
 // and falls back to `twiller`. See utils/dbName.js.
 const dbName = resolveDatabaseName(url);
+// A production boot must never land on a test database. This fails fast for the
+// driver default (`test`) - the exact silent fallback that once routed real
+// production writes into `test` - and warns for other test-looking names.
+const dbGuard = assertProductionDatabaseName(dbName);
 
 mongoose
   .connect(url, { dbName })
   .then(() => {
-    // SAFE startup diagnostic: the selected database NAME only. The URI, host
-    // and credentials are never printed.
+    // SAFE startup diagnostic: environment, selected database NAME and the
+    // sanitized host only. Credentials, tokens and the full URI are never
+    // printed, so this line is safe to paste into a report.
     const activeDb = mongoose.connection.name || dbName;
     console.log("✅ Connected to MongoDB");
-    console.log(`[db] using database "${activeDb}"`);
+    console.log(
+      `[db] env=${process.env.NODE_ENV || "development"} database="${activeDb}" host="${sanitizeMongoHost(url)}"`
+    );
+    if (dbGuard.warning) console.warn(`[db] WARNING: ${dbGuard.warning}.`);
     app.listen(port, () => {
       console.log(`🚀 Server running on port ${port}`);
     });

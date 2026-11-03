@@ -106,10 +106,23 @@ read when the process starts.
 - The development console mock is **never** used in production, so an
   unconfigured provider can no longer look like "the code was sent".
 
-**Database**
-- `MONOGDB_URL` (the name the code reads; `MONGODB_URL` is accepted as a fallback)
-- optional `MONGODB_DB=twiller` to pin the database explicitly (see
-  `backend/utils/dbName.js`). Both `test` and `twiller` data are left untouched.
+**Database (production must be EXPLICIT)**
+- `MONOGDB_URL` — the connection string the code reads (`MONGODB_URL` is accepted
+  as a fallback). **Its database path may be empty** (`mongodb+srv://…/`), which
+  is exactly what used to make the driver fall back to its default `test` DB.
+- **`MONGODB_DB=twiller` — set this in production.** It pins the database name
+  explicitly, so an empty URI path can never silently select `test` again.
+  Resolution order is: `MONGODB_DB` → the path inside the URI → `twiller`.
+- On boot the backend logs one safe line — environment, database NAME and the
+  sanitized host, e.g.
+  `[db] env=production database="twiller" host="cluster.example.mongodb.net"` —
+  never the URI, credentials or query options.
+- With `NODE_ENV=production` the backend **refuses to start** if the selected
+  database is the driver default `test` (and logs a warning for other
+  test-looking names), so a production deploy can never silently write to a test
+  database.
+- Test databases (`twiller_test`, `twiller_langotp_*`, `twiller_audio_*`) stay
+  isolated to the test suites, which only ever run outside production.
 
 ## Notes / limitations
 

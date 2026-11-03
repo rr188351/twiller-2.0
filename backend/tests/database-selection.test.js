@@ -31,6 +31,9 @@ import {
   DEFAULT_APP_DB_NAME,
   databaseNameFromUri,
   resolveDatabaseName,
+  isTestDatabaseName,
+  assertProductionDatabaseName,
+  sanitizeMongoHost,
 } from "../utils/dbName.js";
 import { buildTestMongoUrl, TEST_DB_NAME, startTestServer } from "./helpers/testServer.js";
 
@@ -147,15 +150,19 @@ async function main() {
   const started = await waitFor(`http://localhost:${port}/`);
   check("backend started", started, log.slice(-300));
 
-  const dbLine = log.split("\n").find((l) => l.includes("[db] using database")) || "";
+  const dbLine = log.split("\n").find((l) => l.includes("[db] env=")) || "";
   check(
-    "startup log reports the URI's database",
-    dbLine.includes(`"${isolatedDbName}"`),
+    "startup log reports the environment and the URI's database",
+    dbLine.includes(`database="${isolatedDbName}"`) && dbLine.includes("env="),
     dbLine.trim() || "no [db] line"
   );
   check(
-    "diagnostic never prints the URI or credentials",
-    dbLine.length > 0 && !dbLine.includes("mongodb") && !dbLine.includes("@"),
+    "diagnostic prints the host only - never the URI, credentials or query",
+    dbLine.length > 0 &&
+      !dbLine.includes("://") &&
+      !dbLine.includes("@") &&
+      !dbLine.includes("pass") &&
+      dbLine.includes('host="'),
     dbLine.trim()
   );
 
@@ -205,6 +212,91 @@ async function main() {
     await mongoose.disconnect();
   } finally {
     await server.stop();
+  }
+
+  /* ---------------------------------------------------------------- */
+  console.log("\n[6] production can never silently select a test database");
+  const withDbName = (uri, name) => {
+    const raw = String(uri);
+    const q = raw.indexOf("?");
+    const base = q === -1 ? raw : raw.slice(0, q);
+    const query = q === -1 ? "" : raw.slice(q);
+    const stripped = base.replace(/^mongodb(\+srv)?:\/\//i, "");
+    const scheme = base.slice(0, base.length - stripped.length);
+    const slash = stripped.indexOf("/");
+    const hostPart = slash === -1 ? stripped : stripped.slice(0, slash);
+    return `${scheme}${hostPart}/${name}${query}`;
+  };
+  const EMPTY_PATH_URI = "mongodb+srv://user:pass@cluster.example.net/";
+  check(
+    "an empty-path URI resolves to twiller, never the driver default",
+    resolveDatabaseName(EMPTY_PATH_URI, {}) === "twiller" && databaseNameFromUri(EMPTY_PATH_URI) === ""
+  );
+  const refuses = (name, env) => {
+    try {
+      assertProductionDatabaseName(name, env);
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  check("PRODUCTION + the driver default `test` is refused", refuses("test", { NODE_ENV: "production" }));
+  check(
+    "PRODUCTION + MONGODB_DB=test is refused",
+    refuses(resolveDatabaseName(EMPTY_PATH_URI, { MONGODB_DB: "test" }), { NODE_ENV: "production" })
+  );
+  check("PRODUCTION + `twiller` is allowed", assertProductionDatabaseName("twiller", { NODE_ENV: "production" }).ok === true);
+  check(
+    "PRODUCTION + `twiller_test` is allowed but flagged",
+    (() => {
+      const r = assertProductionDatabaseName("twiller_test", { NODE_ENV: "production" });
+      return r.ok === true && typeof r.warning === "string" && r.warning.length > 0;
+    })()
+  );
+  check(
+    "development stays unrestricted (isolated test DBs keep working)",
+    assertProductionDatabaseName("test", { NODE_ENV: "development" }).ok === true &&
+      assertProductionDatabaseName("twiller_test", {}).ok === true
+  );
+  check(
+    "isTestDatabaseName flags every known test database",
+    ["test", "twiller_test", "twiller_langotp_a_123", "twiller_audio_test", "twiller_qa_stagec"].every(isTestDatabaseName) &&
+      !isTestDatabaseName("twiller")
+  );
+  check(
+    "sanitizeMongoHost strips credentials, path and query",
+    sanitizeMongoHost("mongodb+srv://user:secret@cluster0.abc.mongodb.net/twiller?retryWrites=true") === "cluster0.abc.mongodb.net" &&
+      !sanitizeMongoHost("mongodb+srv://user:secret@cluster0.abc.mongodb.net/twiller").includes("secret")
+  );
+
+  /* ---------------------------------------------------------------- */
+  console.log("\n[7] a PRODUCTION boot pointed at `/test` refuses to start");
+  {
+    const badUri = withDbName(baseUri, "test");
+    const child = spawn(process.execPath, ["index.js"], {
+      cwd: BACKEND_ROOT,
+      env: { ...process.env, NODE_ENV: "production", PORT: "5094", MONOGDB_URL: badUri, MONGODB_URL: badUri, MONGODB_DB: "" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    child.stdout.on("data", (d) => (log += d.toString()));
+    child.stderr.on("data", (d) => (log += d.toString()));
+    const exited = await new Promise((resolve) => {
+      const t = setTimeout(() => resolve(false), 8000);
+      child.on("exit", () => {
+        clearTimeout(t);
+        resolve(true);
+      });
+    });
+    const listening = await waitFor("http://localhost:5094/", 3);
+    check("the process exits instead of serving", exited === true, log.slice(-200));
+    check("it explains why (Refusing to start)", /Refusing to start/.test(log), log.slice(-200));
+    check("nothing is listening on that port", listening === false);
+    try {
+      child.kill();
+    } catch {
+      /* already gone */
+    }
   }
 
   console.log("\n==================================================");
