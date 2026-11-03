@@ -24,7 +24,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import mongoose from "mongoose";
 // Local SMTP stub so the production email path can be tested end-to-end
 // without credentials and without sending real mail.
-import { startSmtpStub } from "./helpers/smtpStub.js";
+import { startSmtpStub, startSilentServer } from "./helpers/smtpStub.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const BACKEND_ROOT = path.join(here, "..");
@@ -97,6 +97,8 @@ async function spawnBackend(name, opts = {}) {
     PORT: String(port),
     MONOGDB_URL: mongoUrl,
     MONGODB_URL: mongoUrl,
+    // Isolation guard: an ambient MONGODB_DB must never override the test DB.
+    MONGODB_DB: "",
     NODE_ENV: opts.nodeEnv || "development",
     OTP_DELIVERY: "console",
     MOCK_MAIL_OUTAGE: "false",
@@ -614,6 +616,57 @@ async function sectionG() {
 }
 
 /* ================= main ================= */
+/* ===== T. a blackholed SMTP host can no longer hang the HTTP request ===== */
+async function sectionTimeout() {
+  console.log("\n[T] the OTP request cannot hang when SMTP is blackholed");
+  // A TCP server that accepts and never speaks = what a blocked SMTP egress
+  // looks like to the client (this is the reported "pending" condition).
+  const silent = await startSilentServer();
+  const s = await spawnBackend(`twiller_langotp_t_${stamp}`, {
+    map: {},
+    env: {
+      OTP_DELIVERY: "smtp",
+      SMTP_HOST: "127.0.0.1",
+      SMTP_PORT: String(silent.port),
+      SMTP_SECURE: "false",
+      SMTP_USER: "leak-user",
+      SMTP_PASS: "sup3rsecret-pass",
+      MAIL_FROM: "Twiller <no-reply@twiller.test>",
+      // A short budget keeps the test fast; production defaults are 10s/10s/20s.
+      SMTP_CONNECTION_TIMEOUT_MS: "600",
+      SMTP_GREETING_TIMEOUT_MS: "600",
+      SMTP_SOCKET_TIMEOUT_MS: "2000",
+    },
+  });
+  const u = await makeUser(s, { uid: "uid-t" });
+  const tok = T("t-main");
+  s.setMap({ [tok]: ident("uid-t", u.email, true) });
+
+  const startedAt = Date.now();
+  const r = await s.api("/auth/language/otp/request", { method: "POST", body: { targetLocale: "fr" }, token: tok });
+  const ms = Date.now() - startedAt;
+
+  check("the request ANSWERS instead of hanging", r.status === 502, `status=${r.status} after ${ms}ms`);
+  check("it answers within a bounded time", ms < 6000, `${ms}ms`);
+  check("it reports delivery-failed truthfully", r.body && r.body.code === "delivery-failed" && r.body.provider === "smtp", JSON.stringify(r));
+  check("the reason names the timeout (actionable)", /timed out/i.test(String(r.body?.reason || "")), JSON.stringify(r.body?.reason));
+  check("no devCode/OTP is returned as a fallback", !("devCode" in (r.body || {})) && !/\b\d{6}\b/.test(JSON.stringify(r.body || {})), JSON.stringify(r.body));
+  check(
+    "no credential leaks into the response",
+    !JSON.stringify(r.body || {}).includes("leak-user") &&
+      !JSON.stringify(r.body || {}).includes("sup3rsecret-pass"),
+    JSON.stringify(r.body)
+  );
+
+  const pendingLeft = await directDb(s.dbUrl, (db) =>
+    db.collection("languageotps").countDocuments({ email: u.email, status: "pending" })
+  );
+  check("no pending OTP document is left behind", pendingLeft === 0, `pending=${pendingLeft}`);
+
+  await s.stop();
+  await silent.close();
+}
+
 async function main() {
   console.log("\nTwiller 2.0 - Feature 4 Phase 2 Stage B: language OTP backend tests");
   const t0 = Date.now();
@@ -625,6 +678,8 @@ async function main() {
     await sectionE();
     await sectionF();
     await sectionG();
+    await sectionTimeout();
+
   } catch (e) {
     console.log("HARNESS ERROR:", (e && e.message) || e);
     process.exitCode = 1;

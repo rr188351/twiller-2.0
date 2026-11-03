@@ -149,6 +149,11 @@ export async function startTestServer(options = {}) {
       PORT: String(port),
       MONOGDB_URL: mongoUrl,
       MONGODB_URL: mongoUrl,
+      // Isolation guard: an ambient MONGODB_DB (e.g. a developer shell that sets
+      // MONGODB_DB=twiller) has the HIGHEST precedence in dbName resolution and
+      // would otherwise make every spawned test backend write into the real
+      // database instead of its isolated one.
+      MONGODB_DB: "",
       NODE_ENV: "development",
       ...extraEnv,
     },

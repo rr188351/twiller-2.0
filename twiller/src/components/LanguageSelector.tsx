@@ -49,6 +49,9 @@ export default function LanguageSelector({ compact = false }: { compact?: boolea
   const [cooldownSeconds, setCooldownSeconds] = useState(0);
   const [dialogError, setDialogError] = useState("");
   const [attemptsRemaining, setAttemptsRemaining] = useState<number | null>(null);
+  // Authoritative duplicate-submission guard: a resend/dropdown double-click
+  // while a request is already in flight is ignored.
+  const inFlightRef = useRef(false);
 
   const showError = useCallback(
     (err: LanguageOtpApiError | null) => {
@@ -59,6 +62,8 @@ export default function LanguageSelector({ compact = false }: { compact?: boolea
 
   const issueCode = useCallback(
     async (next: Locale, idToken: string) => {
+      if (inFlightRef.current) return; // duplicate submission - ignore
+      inFlightRef.current = true;
       setIsRequesting(true);
       try {
         const res = await requestLanguageOtp(idToken, next);
@@ -82,6 +87,7 @@ export default function LanguageSelector({ compact = false }: { compact?: boolea
         showError({ status: 0, error: t("langOtp.errGeneric") });
         setDialogOpen(true);
       } finally {
+        inFlightRef.current = false;
         setIsRequesting(false);
       }
     },
@@ -221,7 +227,10 @@ export default function LanguageSelector({ compact = false }: { compact?: boolea
         {LOCALES.map((code) => (
           <DropdownMenuItem
             key={code}
-            onClick={() => pick(code)}
+            onClick={() => {
+              // Never leave an unhandled rejection behind (pick is async).
+              void pick(code).catch(() => {});
+            }}
             aria-checked={locale === code}
             role="menuitemradio"
             className={`text-white hover:bg-gray-900 cursor-pointer ${

@@ -49,7 +49,7 @@ async function waitForServer(url, tries = 30) {
 
 const server = spawn(process.execPath, ["index.js"], {
   cwd: path.join(here, ".."),
-  env: { ...process.env, NODE_ENV: "production", PORT: String(PORT), MONOGDB_URL: MONGO_URL, MONGODB_URL: MONGO_URL },
+  env: { ...process.env, NODE_ENV: "production", PORT: String(PORT), MONOGDB_URL: MONGO_URL, MONGODB_URL: MONGO_URL, MONGODB_DB: "" },
 });
 
 let log = "";

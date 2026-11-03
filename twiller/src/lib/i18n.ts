@@ -257,6 +257,8 @@ const en = {
     devHint: "Development hint - your code is {code}. Enter it above to verify.",
     errOtpFormat: "Please enter the 6-digit verification code.",
     errNetwork: "Cannot reach the Twiller backend. Make sure it is running and try again.",
+    errTimeout: "The server took too long to respond. Please try again.",
+
     errAuth: "Your session has expired. Please sign in again.",
     errUnavailable: "Verification service is temporarily unavailable. Please try again later.",
     errNoProfile: "No Twiller profile exists for this account yet. Please sign up first.",
@@ -635,6 +637,8 @@ const hi: DeepString<Dictionary> = {
     devHint: "विकास संकेत - आपका कोड {code} है। सत्यापित करने के लिए इसे ऊपर दर्ज करें।",
     errOtpFormat: "कृपया 6 अंकों का सत्यापन कोड दर्ज करें।",
     errNetwork: "Twiller बैकएंड से संपर्क नहीं हो सका। सुनिश्चित करें कि वह चल रहा है और पुनः प्रयास करें।",
+    errTimeout: "सर्वर ने बहुत अधिक समय लिया। कृपया पुनः प्रयास करें।",
+
     errAuth: "आपका सत्र समाप्त हो गया है। कृपया पुनः साइन इन करें।",
     errUnavailable: "सत्यापन सेवा अस्थायी रूप से अनुपलब्ध है। कृपया बाद में पुनः प्रयास करें।",
     errNoProfile: "इस खाते के लिए अभी कोई Twiller प्रोफ़ाइल नहीं है। कृपया पहले साइन अप करें।",
@@ -1003,6 +1007,8 @@ const es: DeepString<Dictionary> = {
     devHint: "Sugerencia de desarrollo - tu código es {code}. Introdúcelo arriba para verificar.",
     errOtpFormat: "Introduce el código de verificación de 6 dígitos.",
     errNetwork: "No se puede contactar con el backend de Twiller. Asegúrate de que esté en ejecución e inténtalo de nuevo.",
+    errTimeout: "El servidor tardó demasiado en responder. Inténtalo de nuevo.",
+
     errAuth: "Tu sesión ha caducado. Inicia sesión de nuevo.",
     errUnavailable: "El servicio de verificación no está disponible. Inténtalo más tarde.",
     errNoProfile: "Aún no existe un perfil de Twiller para esta cuenta. Regístrate primero.",
@@ -1372,6 +1378,8 @@ const pt: DeepString<Dictionary> = {
     devHint: "Dica de desenvolvimento - seu código é {code}. Digite-o acima para verificar.",
     errOtpFormat: "Digite o código de verificação de 6 dígitos.",
     errNetwork: "Não foi possível alcançar o backend do Twiller. Verifique se ele está em execução e tente novamente.",
+    errTimeout: "O servidor demorou demasiado a responder. Tente novamente.",
+
     errAuth: "Sua sessão expirou. Entre novamente.",
     errUnavailable: "Serviço de verificação temporariamente indisponível. Tente novamente mais tarde.",
     errNoProfile: "Ainda não existe um perfil Twiller para esta conta. Cadastre-se primeiro.",
@@ -1738,6 +1746,8 @@ const zh: DeepString<Dictionary> = {
     devHint: "开发提示——您的验证码是{code}，请在上方输入以验证。",
     errOtpFormat: "请输入6位数字验证码。",
     errNetwork: "无法连接Twiller后端，请确认后端正在运行后重试。",
+    errTimeout: "服务器响应时间过长,请重试。",
+
     errAuth: "您的会话已过期，请重新登录。",
     errUnavailable: "验证服务暂时不可用，请稍后再试。",
     errNoProfile: "此账号还没有Twiller个人资料，请先注册。",
@@ -2110,6 +2120,8 @@ const fr: DeepString<Dictionary> = {
     devHint: "Astuce de développement - votre code est {code}. Saisissez-le ci-dessus pour vérifier.",
     errOtpFormat: "Veuillez saisir le code de vérification à 6 chiffres.",
     errNetwork: "Impossible de joindre le backend Twiller. Vérifiez qu'il est démarré puis réessayez.",
+    errTimeout: "Le serveur a mis trop de temps à répondre. Veuillez réessayer.",
+
     errAuth: "Votre session a expiré. Veuillez vous reconnecter.",
     errUnavailable: "Service de vérification temporairement indisponible. Réessayez plus tard.",
     errNoProfile: "Aucun profil Twiller n'existe encore pour ce compte. Inscrivez-vous d'abord.",

@@ -287,6 +287,8 @@ export function langOtpErrorMessage(
   switch (err.code) {
     case "NETWORK":
       return t("langOtp.errNetwork");
+    case "timeout":
+      return t("langOtp.errTimeout");
     case "auth-required":
     case "auth-invalid":
     case "auth-no-email":

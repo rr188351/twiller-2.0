@@ -137,6 +137,8 @@ async function main() {
       PORT: String(port),
       MONOGDB_URL: mongoUrl,
       MONGODB_URL: mongoUrl,
+      // Isolation guard: an ambient MONGODB_DB must never override the test DB.
+      MONGODB_DB: "",
       NODE_ENV: "development",
       // Force the resolver to use the URI path (not an outside override).
       MONGODB_DB: "",

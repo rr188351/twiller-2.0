@@ -96,6 +96,11 @@ read when the process starts.
 - `SMTP_USER`
 - `SMTP_PASS`
 - `MAIL_FROM` (e.g. `Twiller <no-reply@your-domain>`)
+- optional `SMTP_CONNECTION_TIMEOUT_MS` / `SMTP_GREETING_TIMEOUT_MS` /
+  `SMTP_SOCKET_TIMEOUT_MS` (defaults `10000` / `10000` / `20000`) — **bounded
+  failure**: a blocked or blackholed SMTP egress now answers `502
+  delivery-failed` within ~10s with the reason, instead of leaving the request
+  hanging for nodemailer's 120s default connect timeout.
 
 **Fail-closed behaviour — delivery is never faked**
 - `NODE_ENV=production` and the email provider is unset/`console` → the OTP

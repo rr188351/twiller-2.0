@@ -106,4 +106,40 @@ export function closedPort() {
   });
 }
 
-export default { startSmtpStub, closedPort };
+/**
+ * A TCP server that ACCEPTS connections and then never says anything.
+ *
+ * This is what a BLOCKED (blackholed) SMTP egress looks like to a client: the
+ * TCP handshake can complete (or the SYN is simply dropped), but no SMTP
+ * greeting ever arrives. It is the deterministic way to reproduce - and then
+ * prove fixed - the "request stays pending" failure without waiting minutes.
+ */
+export function startSilentServer() {
+  const state = { connections: 0 };
+  const server = net.createServer((socket) => {
+    state.connections += 1;
+    socket.on("error", () => {
+      /* client aborted - expected during cleanup */
+    });
+    // Deliberately never writes a greeting.
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      resolve({
+        port: server.address().port,
+        state,
+        close: () =>
+          new Promise((r) => {
+            try {
+              server.closeAllConnections?.();
+            } catch {
+              /* older node */
+            }
+            server.close(() => r());
+          }),
+      });
+    });
+  });
+}
+
+export default { startSmtpStub, closedPort, startSilentServer };

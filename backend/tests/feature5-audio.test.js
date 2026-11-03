@@ -103,6 +103,8 @@ async function spawnBackend(name, opts = {}) {
     PORT: String(port),
     MONOGDB_URL: mongoUrl,
     MONGODB_URL: mongoUrl,
+    // Isolation guard: an ambient MONGODB_DB must never override the test DB.
+    MONGODB_DB: "",
     NODE_ENV: opts.nodeEnv || "development",
     OTP_DELIVERY: "console",
     MOCK_MAIL_OUTAGE: "false",

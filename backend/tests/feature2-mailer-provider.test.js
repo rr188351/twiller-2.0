@@ -34,7 +34,7 @@ import {
 } from "../utils/mailer.js";
 // Shared stub: the configured path runs against a local SMTP server, so no
 // real mail and no credentials are involved (see tests/helpers/smtpStub.js).
-import { startSmtpStub, closedPort } from "./helpers/smtpStub.js";
+import { startSmtpStub, closedPort, startSilentServer } from "./helpers/smtpStub.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const BACKEND_ROOT = path.join(here, "..");
@@ -304,6 +304,81 @@ async function main() {
     check("the log names the MISSING variables instead", joined.includes("SMTP_HOST"), joined.slice(0, 300));
     check("redact() masks addresses and long secrets", !redact("x user@example.com y").includes("user@example.com") && !redact("token abcdefghijklmnopqrstuvwx").includes("abcdefghijklmnopqrstuvwx"));
   }
+
+  /* ---------------------------------------------------------------- */
+  console.log("\n[10] SMTP waits are BOUNDED (a blackholed host can no longer hang the request)");
+  const transport = smtpTransportOptions();
+  check(
+    "the transport exposes bounded connect/greeting/socket timeouts",
+    transport.connectionTimeout > 0 &&
+      transport.greetingTimeout > 0 &&
+      transport.socketTimeout > 0 &&
+      transport.connectionTimeout <= 30000 &&
+      transport.socketTimeout <= 60000,
+    JSON.stringify({
+      connection: transport.connectionTimeout,
+      greeting: transport.greetingTimeout,
+      socket: transport.socketTimeout,
+    })
+  );
+
+  const silent = await startSilentServer();
+  const silentEnv = (budgetMs) =>
+    noSmtpEnv({
+      OTP_DELIVERY: "smtp",
+      SMTP_HOST: "127.0.0.1",
+      SMTP_PORT: String(silent.port),
+      SMTP_SECURE: "false",
+      SMTP_USER: "u",
+      SMTP_PASS: "p",
+      MAIL_FROM: "Twiller <no-reply@twiller.test>",
+      SMTP_CONNECTION_TIMEOUT_MS: String(budgetMs),
+      SMTP_GREETING_TIMEOUT_MS: String(budgetMs),
+    });
+
+  // (a) REPRODUCE the pre-fix behaviour. The wait equals the configured budget,
+  //     so with nodemailer's 120s default the request stayed "pending" for ~2
+  //     minutes. Proven here by showing it has NOT settled while the budget is
+  //     still open (a rejection handler is attached so nothing goes unhandled).
+  await withEnv(silentEnv(5000), async () => {
+    let settled = false;
+    const pending = sendMail({ to: "u@twiller.test", subject: "s", body: "x" }).then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      }
+    );
+    void pending;
+    await new Promise((r) => setTimeout(r, 1500));
+    check(
+      "REPRODUCED: with a long budget the send is still pending (the stuck request)",
+      settled === false,
+      `settled=${settled}`
+    );
+  });
+
+  // (b) FIXED: the same unreachable host now fails fast, truthfully and without
+  //     leaking the OTP, the address or any credential.
+  const silentStarted = Date.now();
+  const silentResult = await withEnv(silentEnv(600), async () =>
+    sendMail({ to: "u@twiller.test", subject: "s", body: "OTP-CODE-424242", devCode: "424242" })
+  );
+  const silentMs = Date.now() - silentStarted;
+  check(
+    "FIXED: the same host fails within a bounded time instead of hanging",
+    silentResult.delivered === false && silentMs < 5000,
+    `${silentMs}ms ${JSON.stringify(silentResult)}`
+  );
+  check(
+    "the failure is reported as a timeout (actionable, no secrets)",
+    /timed out/i.test(String(silentResult.error)) &&
+      !String(silentResult.error).includes("OTP-CODE-424242") &&
+      !String(silentResult.error).includes("no-reply@twiller.test"),
+    silentResult.error
+  );
+  await silent.close();
 
   console.log("\n==================================================");
   console.log(`  passed: ${passed}   failed: ${failed}`);

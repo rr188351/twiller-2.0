@@ -80,6 +80,25 @@ export type LanguageOtpResult<T> =
  */
 const GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again.";
 
+/**
+ * Hard client-side budget for one OTP request.
+ *
+ * Long enough to survive a slow Render cold start (the service can take 30-60s
+ * to wake up), short enough that the dialog can never hang forever. The BACKEND
+ * already fails a blocked SMTP delivery within ~10-20s, so this is a backstop.
+ * Overridable with NEXT_PUBLIC_OTP_TIMEOUT_MS.
+ */
+const REQUEST_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.NEXT_PUBLIC_OTP_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 60000;
+})();
+
+/** axios reports its own client timeout as ECONNABORTED (or ETIMEDOUT). */
+function isTimeoutError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === "ECONNABORTED" || code === "ETIMEDOUT" || code === "ERR_CANCELED";
+}
+
 /** Strip HTML tags / tags-like content so an error page cannot reach the UI. */
 function stripMarkup(text: string): string {
   return text
@@ -150,7 +169,9 @@ export async function requestLanguageOtp(
     const res = await axiosInstance.post(
       "/auth/language/otp/request",
       { targetLocale },
-      { headers: { Authorization: `Bearer ${idToken}` } }
+      // `timeout` bounds the wait so a blocked/hung delivery can never leave the
+      // dialog spinning forever; the backend also fails fast on its own.
+      { headers: { Authorization: `Bearer ${idToken}` }, timeout: REQUEST_TIMEOUT_MS }
     );
     return { ok: true, status: res.status, data: res.data };
   } catch (err: unknown) {
@@ -169,6 +190,18 @@ export async function requestLanguageOtp(
       (err as { response?: { data?: unknown } }).response
         ? (err as { response: { data?: unknown } }).response.data
         : null;
+    if (status === 0 && isTimeoutError(err)) {
+      return {
+        ok: false,
+        status: 0,
+        error: {
+          status: 0,
+          code: "timeout",
+          error:
+            "The Twiller backend took too long to respond. Please try again.",
+        },
+      };
+    }
     if (status === 0) {
       return {
         ok: false,
@@ -198,7 +231,7 @@ export async function verifyLanguageOtp(
     const res = await axiosInstance.post(
       "/auth/language/otp/verify",
       { targetLocale, otp },
-      { headers: { Authorization: `Bearer ${idToken}` } }
+      { headers: { Authorization: `Bearer ${idToken}` }, timeout: REQUEST_TIMEOUT_MS }
     );
     return { ok: true, status: res.status, data: res.data };
   } catch (err: unknown) {
@@ -217,6 +250,18 @@ export async function verifyLanguageOtp(
       (err as { response?: { data?: unknown } }).response
         ? (err as { response: { data?: unknown } }).response.data
         : null;
+    if (status === 0 && isTimeoutError(err)) {
+      return {
+        ok: false,
+        status: 0,
+        error: {
+          status: 0,
+          code: "timeout",
+          error:
+            "The Twiller backend took too long to respond. Please try again.",
+        },
+      };
+    }
     if (status === 0) {
       return {
         ok: false,

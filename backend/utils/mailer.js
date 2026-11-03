@@ -46,6 +46,17 @@ export function envFlag(value) {
   return ["true", "1", "yes", "on"].includes(String(value ?? "").trim().toLowerCase());
 }
 
+/** Bounded transport timeouts (env-overridable, sane defaults). */
+function smtpTimeoutMs(key, fallback) {
+  const raw = Number(String(process.env[key] ?? "").trim());
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
+/** Defaults: generous enough for a real mail server, short enough to be usable. */
+export const SMTP_DEFAULT_CONNECTION_TIMEOUT_MS = 10000;
+export const SMTP_DEFAULT_GREETING_TIMEOUT_MS = 10000;
+export const SMTP_DEFAULT_SOCKET_TIMEOUT_MS = 20000;
+
 /**
  * Builds the nodemailer transport options, keeping port and TLS mode
  * CONSISTENT when the operator configures only one of SMTP_PORT /
@@ -94,6 +105,14 @@ export function smtpTransportOptions() {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS,
     },
+    // BOUNDED FAILURE - this is what stops an OTP request hanging forever.
+    // Without these, nodemailer's own default connect timeout is 120s, and on a
+    // host that BLACKHOLES outbound SMTP (Render's Free plan blocks ports
+    // 25/465/587) the TCP connect never completes: the route awaits delivery, so
+    // the HTTP request would sit in "pending" for ~2 minutes.
+    connectionTimeout: smtpTimeoutMs("SMTP_CONNECTION_TIMEOUT_MS", SMTP_DEFAULT_CONNECTION_TIMEOUT_MS),
+    greetingTimeout: smtpTimeoutMs("SMTP_GREETING_TIMEOUT_MS", SMTP_DEFAULT_GREETING_TIMEOUT_MS),
+    socketTimeout: smtpTimeoutMs("SMTP_SOCKET_TIMEOUT_MS", SMTP_DEFAULT_SOCKET_TIMEOUT_MS),
   };
 }
 
@@ -221,13 +240,27 @@ async function deliverViaSmtp({ to, subject, body }) {
     await transport.sendMail({ from: mailFrom(), to, subject, text: body });
     return { delivered: true, status: "sent", provider: "smtp" };
   } catch (error) {
-    // Log the transport facts (host/port/secure) plus a redacted reason, so a
-    // production failure is diagnosable without a second round trip. No
-    // credential, address or OTP can reach this line.
+    const options = smtpTransportOptions();
+    // A timeout is the signature of a BLOCKED (blackholed) SMTP egress; name it
+    // precisely so the failure is diagnosable from the logs, and never leak the
+    // credential, the address or the OTP body.
+    const timedOut =
+      error?.code === "ETIMEDOUT" ||
+      error?.code === "ESOCKETTIMEDOUT" ||
+      /timed?\s?out/i.test(String(error?.message || ""));
     console.error(
-      `[mailer] SMTP delivery failed (host=${process.env.SMTP_HOST}, port=${smtpTransportOptions().port}, secure=${smtpTransportOptions().secure}): ${redact(error?.message || "unknown error")}`
+      `[mailer] SMTP delivery ${timedOut ? "TIMEOUT" : "ERROR"} (host=${process.env.SMTP_HOST}, ` +
+        `port=${options.port}, secure=${options.secure}, connectionTimeout=${options.connectionTimeout}ms): ` +
+        `${redact(error?.message || "unknown error")}`
     );
-    return { delivered: false, status: "failed", provider: "smtp", error: "SMTP delivery failed" };
+    return {
+      delivered: false,
+      status: "failed",
+      provider: "smtp",
+      error: timedOut
+        ? `SMTP connection timed out after ${options.connectionTimeout}ms - outbound SMTP may be blocked by the host`
+        : "SMTP delivery failed",
+    };
   }
 }
 
