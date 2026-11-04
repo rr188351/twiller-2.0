@@ -7,7 +7,7 @@ import Tweet from "./models/tweet.js";
 import PasswordReset from "./models/passwordreset.js";
 import LanguageOtp, { LANGUAGE_OTP_LOCALES } from "./models/languageotp.js";
 import AudioOtp from "./models/audiootp.js";
-import { sendMail, exposeDevCode } from "./utils/mailer.js";
+import { sendMail, exposeDevCode, checkEmailDelivery } from "./utils/mailer.js";
 // Selects the application database explicitly so an empty URI path can never
 // make the driver fall back to its default `test` database (see the module).
 import { resolveDatabaseName, assertProductionDatabaseName, sanitizeMongoHost } from "./utils/dbName.js";
@@ -154,6 +154,25 @@ mongoose
     app.listen(port, () => {
       console.log(`🚀 Server running on port ${port}`);
     });
+    // Non-fatal, bounded egress check (fire-and-forget, AFTER listening). On a
+    // host that blocks outbound SMTP this names the blocker at boot instead of
+    // leaving users to discover it through a failed OTP request. Never fatal and
+    // never prints a credential, address or OTP.
+    checkEmailDelivery()
+      .then((health) => {
+        if (health.reachable) {
+          console.log(`[mail] SMTP reachable (host=${health.host}, port=${health.port})`);
+        } else {
+          console.warn(
+            `[mail] email delivery is NOT available (mode=${health.mode}${
+              health.host ? `, host=${health.host}, port=${health.port}` : ""
+            }): ${health.reason}. Language/audio/sign-in OTP emails and invoices cannot be delivered until outbound SMTP works from this host.`
+          );
+        }
+      })
+      .catch(() => {
+        /* diagnostics must never affect the server */
+      });
   })
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err.message);

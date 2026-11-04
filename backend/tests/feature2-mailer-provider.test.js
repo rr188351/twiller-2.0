@@ -31,6 +31,7 @@ import {
   SMTP_REQUIRED_ENV,
   smtpTransportOptions,
   redact,
+  checkEmailDelivery,
 } from "../utils/mailer.js";
 // Shared stub: the configured path runs against a local SMTP server, so no
 // real mail and no credentials are involved (see tests/helpers/smtpStub.js).
@@ -379,6 +380,63 @@ async function main() {
     silentResult.error
   );
   await silent.close();
+
+  /* ---------------------------------------------------------------- */
+  console.log("\n[11] boot-time email-delivery health check (names a blocked egress)");
+  await withEnv(noSmtpEnv({ OTP_DELIVERY: "console", NODE_ENV: "production" }), async () => {
+    const h = await checkEmailDelivery();
+    check("not-configured mode -> not reachable, names the mode", h.reachable === false && String(h.reason).includes("mode=console"), JSON.stringify(h));
+  });
+  await withEnv(noSmtpEnv({ OTP_DELIVERY: "smtp", NODE_ENV: "production" }), async () => {
+    const h = await checkEmailDelivery();
+    check("missing SMTP_* -> not reachable, names the variables", h.reachable === false && String(h.reason).includes("SMTP_HOST"), JSON.stringify(h));
+  });
+  {
+    const silentHealth = await startSilentServer();
+    const healthStarted = Date.now();
+    const h = await withEnv(
+      noSmtpEnv({
+        OTP_DELIVERY: "smtp",
+        NODE_ENV: "production",
+        SMTP_HOST: "127.0.0.1",
+        SMTP_PORT: String(silentHealth.port),
+        SMTP_SECURE: "false",
+        SMTP_USER: "leak-user",
+        SMTP_PASS: "sup3rsecret-pass",
+        MAIL_FROM: "Twiller <no-reply@twiller.test>",
+        SMTP_CONNECTION_TIMEOUT_MS: "600",
+        SMTP_GREETING_TIMEOUT_MS: "600",
+      }),
+      async () => checkEmailDelivery()
+    );
+    const healthMs = Date.now() - healthStarted;
+    check("blackholed SMTP -> not reachable and flagged as a timeout", h.reachable === false && h.timedOut === true, JSON.stringify(h));
+    check("the health check is bounded (it can never hang the boot)", healthMs < 5000, `${healthMs}ms`);
+    check(
+      "the health check leaks no credential",
+      !JSON.stringify(h).includes("leak-user") && !JSON.stringify(h).includes("sup3rsecret-pass"),
+      JSON.stringify(h)
+    );
+    await silentHealth.close();
+  }
+  {
+    const liveStub = await startSmtpStub();
+    const h = await withEnv(
+      noSmtpEnv({
+        OTP_DELIVERY: "smtp",
+        NODE_ENV: "production",
+        SMTP_HOST: "127.0.0.1",
+        SMTP_PORT: String(liveStub.port),
+        SMTP_SECURE: "false",
+        SMTP_USER: "stub-user",
+        SMTP_PASS: "stub-pass",
+        MAIL_FROM: "Twiller <no-reply@twiller.test>",
+      }),
+      async () => checkEmailDelivery()
+    );
+    check("a reachable SMTP host -> reachable true with host+port", h.reachable === true && h.port === liveStub.port, JSON.stringify(h));
+    await liveStub.close();
+  }
 
   console.log("\n==================================================");
   console.log(`  passed: ${passed}   failed: ${failed}`);

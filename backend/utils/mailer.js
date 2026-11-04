@@ -265,6 +265,53 @@ async function deliverViaSmtp({ to, subject, body }) {
 }
 
 /**
+ * Bounded, NON-FATAL reachability check for the configured email transport.
+ *
+ * WHY: on hosts that blackhole outbound SMTP (e.g. Render's Free plan blocks
+ * ports 25/465/587) the only symptom is a 502 on an OTP request. This check runs
+ * once at boot (after the server starts listening) and NAMES the blocker in the
+ * logs, using the same bounded timeouts - so the operator sees it immediately.
+ *
+ * It never throws, never blocks startup and never prints a credential, address
+ * or OTP: only the mode, the host/port and a redacted reason.
+ *
+ * @returns {Promise<{mode:string, reachable:boolean, host?:string, port?:number, timedOut?:boolean, reason?:string}>}
+ */
+export async function checkEmailDelivery() {
+  const mode = resolveMailMode();
+  if (mode !== "smtp") {
+    return { mode, reachable: false, reason: `email delivery is not configured (mode=${mode})` };
+  }
+  const missing = missingSmtpEnv();
+  if (missing.length > 0) {
+    return { mode, reachable: false, reason: `missing ${missing.join(", ")}` };
+  }
+
+  const options = smtpTransportOptions();
+  try {
+    const nodemailer = (await import("nodemailer")).default;
+    const transport = nodemailer.createTransport(options);
+    // verify() opens the SMTP connection and reads the greeting, honouring the
+    // connectionTimeout / greetingTimeout set above.
+    await transport.verify();
+    return { mode, reachable: true, host: options.host, port: options.port };
+  } catch (error) {
+    const timedOut =
+      error?.code === "ETIMEDOUT" ||
+      error?.code === "ESOCKETTIMEDOUT" ||
+      /timed?\s?out/i.test(String(error?.message || ""));
+    return {
+      mode,
+      reachable: false,
+      host: options.host,
+      port: options.port,
+      timedOut,
+      reason: redact(error?.message || "unknown error"),
+    };
+  }
+}
+
+/**
  * Sends an email using the configured provider.
  *
  * @param {{to:string, subject:string, body:string, kind?:string, devCode?:string}} message

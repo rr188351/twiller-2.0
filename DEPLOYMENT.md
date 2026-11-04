@@ -101,6 +101,12 @@ read when the process starts.
   failure**: a blocked or blackholed SMTP egress now answers `502
   delivery-failed` within ~10s with the reason, instead of leaving the request
   hanging for nodemailer's 120s default connect timeout.
+- **At boot the backend also checks the transport once** (non-fatal, bounded,
+  after it starts listening) and logs either
+  `[mail] SMTP reachable (host=…, port=465)` or the actionable
+  `[mail] email delivery is NOT available (…): connect ETIMEDOUT … Language/audio/sign-in OTP emails and invoices cannot be delivered until outbound SMTP works from this host.`
+  — so a blocked egress is visible in the logs immediately, not only when a user
+  tries to change language. **No email is sent by this check.**
 
 **Fail-closed behaviour — delivery is never faked**
 - `NODE_ENV=production` and the email provider is unset/`console` → the OTP
