@@ -161,12 +161,16 @@ mongoose
     checkEmailDelivery()
       .then((health) => {
         if (health.reachable) {
-          console.log(`[mail] SMTP reachable (host=${health.host}, port=${health.port})`);
+          console.log(
+            `[mail] email delivery configured (provider=${health.provider}${
+              health.host ? `, host=${health.host}, port=${health.port}` : ""
+            })`
+          );
         } else {
           console.warn(
-            `[mail] email delivery is NOT available (mode=${health.mode}${
+            `[mail] email delivery is NOT available (mode=${health.mode}, provider=${health.provider}${
               health.host ? `, host=${health.host}, port=${health.port}` : ""
-            }): ${health.reason}. Language/audio/sign-in OTP emails and invoices cannot be delivered until outbound SMTP works from this host.`
+            }): ${health.reason}. Language/audio/sign-in OTP emails and invoices cannot be delivered until this is fixed.`
           );
         }
       })
