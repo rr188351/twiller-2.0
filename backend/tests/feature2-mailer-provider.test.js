@@ -22,13 +22,19 @@
  */
 
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   sendMail,
   resolveMailMode,
+  resolveMailProvider,
   missingSmtpEnv,
+  missingBrevoEnv,
+  missingMailEnv,
+  senderFromMailFrom,
   SMTP_REQUIRED_ENV,
+  BREVO_REQUIRED_ENV,
   smtpTransportOptions,
   redact,
   checkEmailDelivery,
@@ -72,10 +78,45 @@ async function withEnv(vars, fn) {
   }
 }
 
-/** The SMTP_* variables plus OTP_DELIVERY, all cleared. */
+/** Every email-transport variable cleared, so each section stays deterministic. */
 function noSmtpEnv(extra = {}) {
-  const cleared = Object.fromEntries(SMTP_REQUIRED_ENV.map((k) => [k, undefined]));
-  return { ...cleared, SMTP_PORT: undefined, ...extra };
+  const cleared = Object.fromEntries(
+    [...SMTP_REQUIRED_ENV, ...BREVO_REQUIRED_ENV].map((k) => [k, undefined])
+  );
+  return {
+    ...cleared,
+    SMTP_PORT: undefined,
+    MAIL_PROVIDER: undefined,
+    BREVO_API_URL: undefined,
+    BREVO_TIMEOUT_MS: undefined,
+    ...extra,
+  };
+}
+
+/** Tiny HTTP stub standing in for the Brevo REST API. */
+function startHttpStub(handler) {
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => handler(req, res, body));
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      resolve({
+        base: `http://127.0.0.1:${port}`,
+        close: () =>
+          new Promise((r) => {
+            try {
+              server.closeAllConnections?.();
+            } catch {
+              /* older node */
+            }
+            server.close(() => r());
+          }),
+      });
+    });
+  });
 }
 
 // The SMTP stub + closedPort helper live in tests/helpers/smtpStub.js so this
@@ -438,6 +479,154 @@ async function main() {
     await liveStub.close();
   }
 
+  /* ---------------------------------------------------------------- */
+  console.log("\n[12] Brevo HTTPS provider (NO domain needed; works where SMTP is blocked)");
+  await withEnv(noSmtpEnv({ BREVO_API_KEY: "xkeysib-test-dummy", MAIL_FROM: "Twiller <no-reply@twiller.test>" }), async () => {
+    check("a BREVO_API_KEY switches the transport to brevo", resolveMailProvider() === "brevo");
+    check("brevo needs no SMTP_* variable at all", missingMailEnv().length === 0 && missingBrevoEnv().length === 0);
+    check("MAIL_FROM is parsed into Brevo's sender object", (() => {
+      const s = senderFromMailFrom();
+      return s.email === "no-reply@twiller.test" && s.name === "Twiller";
+    })());
+  });
+  await withEnv(noSmtpEnv({ MAIL_PROVIDER: "smtp", BREVO_API_KEY: "xkeysib-test-dummy" }), async () => {
+    check("MAIL_PROVIDER=smtp still forces SMTP (local development)", resolveMailProvider() === "smtp");
+  });
+
+  const brevoState = {};
+  const brevoOk = await startHttpStub((req, res, body) => {
+    brevoState.path = req.url;
+    brevoState.key = req.headers["api-key"] || "";
+    brevoState.body = body;
+    res.writeHead(201, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ messageId: "<stub@brevo>" }));
+  });
+  await withEnv(
+    noSmtpEnv({
+      OTP_DELIVERY: "smtp",
+      MAIL_PROVIDER: "brevo",
+      NODE_ENV: "production",
+      BREVO_API_KEY: "xkeysib-test-dummy",
+      BREVO_API_URL: brevoOk.base,
+      MAIL_FROM: "Twiller <no-reply@twiller.test>",
+    }),
+    async () => {
+      const r = await sendMail({ to: "user@twiller.test", subject: "Your code", body: "OTP-CODE-123456", devCode: "123456" });
+      check('brevo acceptance -> delivered true, status "sent"', r.delivered === true && r.status === "sent", JSON.stringify(r));
+      check('provider is "brevo"', r.provider === "brevo", JSON.stringify(r));
+      check("PRODUCTION never echoes the devCode", !("devCode" in r), JSON.stringify(r));
+      let sent = null;
+      try {
+        sent = JSON.parse(brevoState.body);
+      } catch {
+        sent = null;
+      }
+      check(
+        "the provider received sender/to/subject/textContent",
+        !!sent &&
+          sent.subject === "Your code" &&
+          sent.to?.[0]?.email === "user@twiller.test" &&
+          String(sent.textContent).includes("OTP-CODE-123456") &&
+          sent.sender?.email === "no-reply@twiller.test",
+        brevoState.body
+      );
+      check(
+        "the documented endpoint + api-key header are used",
+        brevoState.path === "/v3/smtp/email" && /^xkeysib-/.test(brevoState.key),
+        `${brevoState.path} auth=${String(brevoState.key).slice(0, 7)}...`
+      );
+      check("the API key never appears in the body", !String(brevoState.body).includes("xkeysib-test-dummy"));
+    }
+  );
+  await brevoOk.close();
+
+  const brevoBad = await startHttpStub((req, res) => {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ code: "invalid_parameter", message: "Sender is not valid / not verified" }));
+  });
+  await withEnv(
+    noSmtpEnv({
+      OTP_DELIVERY: "smtp",
+      MAIL_PROVIDER: "brevo",
+      NODE_ENV: "production",
+      BREVO_API_KEY: "xkeysib-test-dummy",
+      BREVO_API_URL: brevoBad.base,
+      MAIL_FROM: "Twiller <no-reply@twiller.test>",
+    }),
+    async () => {
+      const r = await sendMail({ to: "user@twiller.test", subject: "s", body: "OTP-CODE-777777", devCode: "777777" });
+      check("brevo rejection -> delivered false / failed", r.delivered === false && r.status === "failed", JSON.stringify(r));
+      check("the provider's own reason is surfaced (e.g. sender not verified)", String(r.error).includes("not verified"), r.error);
+      check(
+        "the rejection leaks no OTP and no key",
+        !JSON.stringify(r).includes("OTP-CODE-777777") && !JSON.stringify(r).includes("xkeysib-test-dummy")
+      );
+    }
+  );
+  await brevoBad.close();
+
+  const brevoHang = await startHttpStub(() => {
+    /* deliberately never responds */
+  });
+  const brevoStarted = Date.now();
+  await withEnv(
+    noSmtpEnv({
+      OTP_DELIVERY: "smtp",
+      MAIL_PROVIDER: "brevo",
+      NODE_ENV: "production",
+      BREVO_API_KEY: "xkeysib-test-dummy",
+      BREVO_API_URL: brevoHang.base,
+      BREVO_TIMEOUT_MS: "400",
+      MAIL_FROM: "Twiller <no-reply@twiller.test>",
+    }),
+    async () => {
+      const r = await sendMail({ to: "user@twiller.test", subject: "s", body: "x" });
+      check("a hanging brevo API -> failed with a timeout error", r.delivered === false && /timed out/i.test(String(r.error)), JSON.stringify(r));
+      check("no devCode on a timeout", !("devCode" in r));
+    }
+  );
+  check("the brevo budget is enforced (returned well under 5s)", Date.now() - brevoStarted < 5000, `ms=${Date.now() - brevoStarted}`);
+  await brevoHang.close();
+
+  await withEnv(
+    noSmtpEnv({ OTP_DELIVERY: "smtp", MAIL_PROVIDER: "brevo", NODE_ENV: "production", MAIL_FROM: "Twiller <x@twiller.test>" }),
+    async () => {
+      const r = await sendMail({ to: "user@twiller.test", subject: "s", body: "x" });
+      check("brevo without BREVO_API_KEY -> failed, names the variable", r.delivered === false && String(r.error).includes("BREVO_API_KEY"), JSON.stringify(r));
+      const h = await checkEmailDelivery();
+      check("the boot health check reports brevo unconfigured", h.reachable === false && String(h.reason).includes("BREVO_API_KEY"), JSON.stringify(h));
+    }
+  );
+  // Missing MAIL_FROM: the send fails BEFORE any network call, naming it.
+  await withEnv(
+    noSmtpEnv({
+      OTP_DELIVERY: "smtp",
+      MAIL_PROVIDER: "brevo",
+      NODE_ENV: "production",
+      BREVO_API_KEY: "xkeysib-test-dummy",
+    }),
+    async () => {
+      const r = await sendMail({ to: "user@twiller.test", subject: "s", body: "x" });
+      check("brevo without MAIL_FROM -> failed, names MAIL_FROM", r.delivered === false && String(r.error).includes("MAIL_FROM"), JSON.stringify(r));
+      const h = await checkEmailDelivery();
+      check("the boot health check names MAIL_FROM too", h.reachable === false && String(h.reason).includes("MAIL_FROM"), JSON.stringify(h));
+    }
+  );
+  // Fully configured: the health check passes WITHOUT any network call (HTTPS is
+  // never blocked, unlike SMTP), so it is safe to run on every boot.
+  await withEnv(
+    noSmtpEnv({
+      OTP_DELIVERY: "smtp",
+      MAIL_PROVIDER: "brevo",
+      NODE_ENV: "production",
+      BREVO_API_KEY: "xkeysib-test-dummy",
+      MAIL_FROM: "Twiller <no-reply@twiller.test>",
+    }),
+    async () => {
+      const h = await checkEmailDelivery();
+      check("the boot health check reports brevo configured (config-only, no network)", h.reachable === true && h.provider === "brevo", JSON.stringify(h));
+    }
+  );
   console.log("\n==================================================");
   console.log(`  passed: ${passed}   failed: ${failed}`);
   if (failed > 0) console.log(`  failures: ${failures.join(" | ")}`);

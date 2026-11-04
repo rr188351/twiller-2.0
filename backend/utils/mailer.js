@@ -58,6 +58,81 @@ export const SMTP_DEFAULT_GREETING_TIMEOUT_MS = 10000;
 export const SMTP_DEFAULT_SOCKET_TIMEOUT_MS = 20000;
 
 /**
+ * HTTPS transactional-email provider (Brevo) - the NO-DOMAIN, FREE option.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * Render's Free plan blocks outbound SMTP (ports 25/465/587), so the Language and
+ * Audio OTP emails can never leave the box over SMTP from there. Brevo's REST API
+ * runs on HTTPS/443, which is never blocked, and its FREE plan (300 emails/day)
+ * includes transactional sending.
+ *
+ * NO DOMAIN IS NEEDED: `POST /v3/senders` registers a single FROM address and
+ * emails it a confirmation code; `PUT /v3/senders/{id}/validate` activates it with
+ * that OTP. Domain authentication (SPF/DKIM) is a separate, optional step for
+ * reputation - it is NOT what validates a sender.
+ *
+ * Configuration (server-side only - never committed, never logged):
+ *   BREVO_API_KEY       API key from Brevo (Settings -> SMTP & API -> API keys)
+ *   MAIL_FROM           the FROM address you VERIFIED in Brevo ("Name <addr>")
+ *   MAIL_PROVIDER       "brevo" | "smtp" (optional; inferred from the key)
+ *   BREVO_API_URL       override for tests (local stub)
+ *   BREVO_TIMEOUT_MS    request budget (default 15000) so a hang cannot stall
+ *                       an OTP request
+ */
+export const BREVO_REQUIRED_ENV = ["BREVO_API_KEY", "MAIL_FROM"];
+export const BREVO_DEFAULT_API_URL = "https://api.brevo.com";
+export const BREVO_DEFAULT_TIMEOUT_MS = 15000;
+
+/**
+ * Which real transport to use once delivery is switched on.
+ *
+ *   MAIL_PROVIDER=brevo | smtp  -> explicit choice wins
+ *   unset                       -> "brevo" when BREVO_API_KEY is present,
+ *                                  otherwise "smtp" (local development keeps
+ *                                  working exactly as before)
+ */
+export function resolveMailProvider() {
+  const explicit = (process.env.MAIL_PROVIDER || "").trim().toLowerCase();
+  if (explicit === "brevo" || explicit === "smtp") return explicit;
+  return String(process.env.BREVO_API_KEY || "").trim() ? "brevo" : "smtp";
+}
+
+/** Brevo variables still missing (names only - never values). */
+export function missingBrevoEnv() {
+  return BREVO_REQUIRED_ENV.filter((key) => !String(process.env[key] || "").trim());
+}
+
+/** Variables the SELECTED provider cannot work without (names only). */
+export function missingMailEnv(provider = resolveMailProvider()) {
+  return provider === "brevo" ? missingBrevoEnv() : missingSmtpEnv();
+}
+
+/**
+ * Splits the configured MAIL_FROM into Brevo's sender object.
+ * Accepts both `Name <addr@x>` and a bare `addr@x`.
+ */
+export function senderFromMailFrom() {
+  const raw = mailFrom();
+  const match = raw.match(/^\s*(.*?)\s*<\s*([^>]+)\s*>\s*$/);
+  if (match) {
+    return { name: match[1] || undefined, email: match[2].trim() };
+  }
+  return { email: raw.trim() };
+}
+
+/** Brevo API base; BREVO_API_URL lets tests point at a local stub. */
+function brevoApiBase() {
+  return String(process.env.BREVO_API_URL || BREVO_DEFAULT_API_URL).replace(/\/+$/, "");
+}
+
+/** Bounded request budget so a hanging provider can never stall an OTP call. */
+function brevoTimeoutMs() {
+  const raw = Number(String(process.env.BREVO_TIMEOUT_MS ?? "").trim());
+  return Number.isFinite(raw) && raw > 0 ? raw : BREVO_DEFAULT_TIMEOUT_MS;
+}
+
+/**
  * Builds the nodemailer transport options, keeping port and TLS mode
  * CONSISTENT when the operator configures only one of SMTP_PORT /
  * SMTP_SECURE.
@@ -282,9 +357,24 @@ export async function checkEmailDelivery() {
   if (mode !== "smtp") {
     return { mode, reachable: false, reason: `email delivery is not configured (mode=${mode})` };
   }
+
+  // Brevo is HTTPS/443 - the transport that works where SMTP egress is blocked.
+  const provider = resolveMailProvider();
+  if (provider === "brevo") {
+    const brevoMissing = missingBrevoEnv();
+    return brevoMissing.length > 0
+      ? { mode, provider, reachable: false, reason: `missing ${brevoMissing.join(", ")}` }
+      : {
+          mode,
+          provider,
+          reachable: true,
+          reason: "HTTPS API configured (delivery also depends on the sender being verified)",
+        };
+  }
+
   const missing = missingSmtpEnv();
   if (missing.length > 0) {
-    return { mode, reachable: false, reason: `missing ${missing.join(", ")}` };
+    return { mode, provider, reachable: false, reason: `missing ${missing.join(", ")}` };
   }
 
   const options = smtpTransportOptions();
@@ -294,7 +384,7 @@ export async function checkEmailDelivery() {
     // verify() opens the SMTP connection and reads the greeting, honouring the
     // connectionTimeout / greetingTimeout set above.
     await transport.verify();
-    return { mode, reachable: true, host: options.host, port: options.port };
+    return { mode, provider, reachable: true, host: options.host, port: options.port };
   } catch (error) {
     const timedOut =
       error?.code === "ETIMEDOUT" ||
@@ -302,11 +392,87 @@ export async function checkEmailDelivery() {
       /timed?\s?out/i.test(String(error?.message || ""));
     return {
       mode,
+      provider,
       reachable: false,
       host: options.host,
       port: options.port,
       timedOut,
       reason: redact(error?.message || "unknown error"),
+    };
+  }
+}
+
+/**
+ * Real HTTPS provider (Brevo) - the transport that works from hosts whose SMTP
+ * egress is blocked (e.g. Render Free). Same response contract as the SMTP
+ * adapter, so no caller changes.
+ */
+async function deliverViaBrevo({ to, subject, body }) {
+  const missing = missingBrevoEnv();
+  if (missing.length > 0) {
+    // Configuration fact only (variable NAMES) - never a credential value.
+    return {
+      delivered: false,
+      status: "failed",
+      provider: "brevo",
+      error:
+        `Email delivery is not configured: ${missing.join(", ")} missing. ` +
+        `Set OTP_DELIVERY=smtp, MAIL_PROVIDER=brevo and ${BREVO_REQUIRED_ENV.join(", ")} in the backend environment ` +
+        `(the MAIL_FROM address must first be verified in Brevo).`,
+    };
+  }
+
+  const timeoutMs = brevoTimeoutMs();
+  try {
+    const res = await fetch(`${brevoApiBase()}/v3/smtp/email`, {
+      method: "POST",
+      headers: {
+        "api-key": process.env.BREVO_API_KEY,
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify({
+        sender: senderFromMailFrom(),
+        to: [{ email: to }],
+        subject,
+        textContent: body,
+      }),
+      // A bounded budget: a hanging provider must never stall the OTP request.
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    const payload = await res.json().catch(() => null);
+    // Brevo answers 201 Created with { messageId } on success.
+    if (!res.ok) {
+      const detail = (payload && (payload.message || payload.code)) || `HTTP ${res.status}`;
+      console.error(`[mailer] brevo rejected the message (${res.status}): ${redact(detail)}`);
+      return {
+        delivered: false,
+        status: "failed",
+        provider: "brevo",
+        error: `Email provider rejected the message: ${redact(detail)}`,
+      };
+    }
+
+    return {
+      delivered: true,
+      status: "sent",
+      provider: "brevo",
+      providerMessageId: payload && payload.messageId ? String(payload.messageId) : undefined,
+    };
+  } catch (error) {
+    const timedOut = error?.name === "AbortError" || error?.name === "TimeoutError";
+    const reason = timedOut
+      ? `request exceeded the ${timeoutMs}ms budget`
+      : redact(error?.message || "unknown error");
+    console.error(`[mailer] brevo delivery failed (timeout=${timeoutMs}ms): ${reason}`);
+    return {
+      delivered: false,
+      status: "failed",
+      provider: "brevo",
+      error: timedOut
+        ? `Email provider timed out after ${timeoutMs}ms`
+        : "Email transport error (provider unreachable).",
     };
   }
 }
@@ -323,7 +489,12 @@ export async function sendMail({ to, subject, body, kind = "generic", devCode })
   let result;
 
   if (mode === "smtp") {
-    result = await deliverViaSmtp({ to, subject, body });
+    // Which real transport: MAIL_PROVIDER, or inferred from BREVO_API_KEY.
+    const provider = resolveMailProvider();
+    result =
+      provider === "brevo"
+        ? await deliverViaBrevo({ to, subject, body })
+        : await deliverViaSmtp({ to, subject, body });
   } else if (mode === "console") {
     if (process.env.NODE_ENV === "production") {
       // Hard guard: the development mock must NEVER be used in production, even
@@ -334,8 +505,9 @@ export async function sendMail({ to, subject, body, kind = "generic", devCode })
         status: "failed",
         provider: "console",
         error:
-          `Mock email delivery is disabled in production. Set OTP_DELIVERY=smtp and ` +
-          `${SMTP_REQUIRED_ENV.join(", ")}.`,
+          `Mock email delivery is disabled in production. Set OTP_DELIVERY=smtp and either ` +
+          `${BREVO_REQUIRED_ENV.join(", ")} (HTTPS - works where SMTP egress is blocked, e.g. Render Free) ` +
+          `or ${SMTP_REQUIRED_ENV.join(", ")}.`,
       };
     } else {
       result = deliverViaConsole({ to, subject, body, kind });
@@ -354,8 +526,9 @@ export async function sendMail({ to, subject, body, kind = "generic", devCode })
       status: "failed",
       provider: "unconfigured",
       error:
-        `Email delivery is not configured. Set OTP_DELIVERY=smtp and ` +
-        `${SMTP_REQUIRED_ENV.join(", ")}.`,
+        `Email delivery is not configured. Set OTP_DELIVERY=smtp and either ` +
+        `${BREVO_REQUIRED_ENV.join(", ")} (HTTPS - works where SMTP egress is blocked, e.g. Render Free) ` +
+        `or ${SMTP_REQUIRED_ENV.join(", ")}.`,
     };
   }
 
@@ -415,13 +588,13 @@ export const mailerConfig = {
     return resolveMailMode();
   },
   get provider() {
-    return resolveMailMode() === "smtp" ? "smtp" : "console";
+    return resolveMailMode() === "smtp" ? resolveMailProvider() : "console";
   },
   get from() {
     return mailFrom();
   },
   get missingEnv() {
-    return resolveMailMode() === "smtp" ? missingSmtpEnv() : [];
+    return resolveMailMode() === "smtp" ? missingMailEnv() : [];
   },
   get exposesDevCode() {
     return exposeDevCode();
@@ -434,7 +607,12 @@ export default {
   exposeDevCode,
   mailerConfig,
   resolveMailMode,
+  resolveMailProvider,
   missingSmtpEnv,
+  missingBrevoEnv,
+  missingMailEnv,
+  senderFromMailFrom,
+  checkEmailDelivery,
   smtpTransportOptions,
   redact,
 };

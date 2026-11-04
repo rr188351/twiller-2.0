@@ -88,7 +88,17 @@ answer `502 delivery-failed` with the reason instead of pretending to have sent.
 Set these on the backend service and then **redeploy** — environment variables are
 read when the process starts.
 
-**Email / SMTP (REQUIRED in production)**
+**Email — Brevo HTTPS API (RECOMMENDED on Render Free - no domain needed)**
+- `BREVO_API_KEY` (Brevo → Settings → SMTP & API → API keys; secret)
+- `MAIL_FROM` — the sender you **verified in Brevo** (Brevo emails it a 6-digit
+  code; confirming that code activates the sender - **no DNS/domain required**)
+- `OTP_DELIVERY=smtp` (the "real delivery" switch; keep it)
+- optional `MAIL_PROVIDER=brevo` (inferred automatically when the key is present)
+- optional `BREVO_TIMEOUT_MS` (default `15000`)
+- Note: sending from a free-mail address (e.g. gmail.com) may land in spam, since
+  SPF/DKIM cannot align without a domain. Deliverability, not a blocker.
+
+**Email — SMTP (alternative; only where SMTP egress works)**
 - `OTP_DELIVERY=smtp`
 - `SMTP_HOST`
 - `SMTP_PORT` (the repo example uses `465`)
