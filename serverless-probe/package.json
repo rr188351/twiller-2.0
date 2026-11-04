@@ -1,0 +1,13 @@
+{
+  "name": "twiller-smtp-probe",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "THROWAWAY SMTP egress probe for Twiller 2.0. Tests TCP connectivity to smtp.gmail.com:465/587 and optionally SMTP verify(). NEVER sends an email. Standalone: no MongoDB, no Firebase, no app imports. Delete after testing.",
+  "engines": {
+    "node": "20.x"
+  },
+  "dependencies": {
+    "nodemailer": "^6.10.1"
+  }
+}

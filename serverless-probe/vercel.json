@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/smtp-probe.mjs": {
+      "maxDuration": 60
+    }
+  }
+}
