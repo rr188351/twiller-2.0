@@ -52,6 +52,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { probeAudioDuration, MAX_AUDIO_DURATION_SECONDS } from "./utils/audioProbe.js";
 import multer from "multer";
+// Wedding RSVP - the invitation website's reply form. Reply records live in
+// their OWN MongoDB database ("wedding_rsvp"), never in a Twiller collection.
+import {
+  saveWeddingRsvp,
+  WeddingRsvpValidationError,
+  WeddingRsvpUnavailableError,
+  WEDDING_RSVP_DB_NAME,
+  WEDDING_RSVP_SOURCE,
+} from "./models/weddingRsvp.js";
+import { createIpRateLimiter } from "./utils/rateLimit.js";
 
 
 // Persistent audio storage directory. Configurable via AUDIO_UPLOAD_DIR; falls
@@ -85,6 +95,77 @@ const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || "")
   .split(",")
   .map((o) => o.trim())
   .filter(Boolean);
+
+// ---------------------------------------------------------------------------
+// WEDDING RSVP - its own origin guard, scoped to /api/wedding/*.
+//
+// The invitation site lives on GitHub Pages, which is a DIFFERENT origin from
+// this API, so the browser requires CORS - and a JSON POST is preflighted.
+// This guard therefore runs BEFORE the global CORS middleware below, so that:
+//
+//   - the wedding origin is always allowed, whatever CORS_ORIGINS is set to
+//     (Render may be running the locked-down allow-list meant for Twiller);
+//   - local development origins (any port on localhost / 127.0.0.1 / ::1) are
+//     allowed, so `npm run dev` can reply to a local API;
+//   - any other origin is refused outright - an unrelated site cannot post
+//     replies into the couple's guest list;
+//   - REGISTERED BEFORE the global middleware it can never be affected by, or
+//     affect, Twiller's own permissive/allow-list CORS configuration.
+//
+// Add extra origins (e.g. a custom domain) as a comma-separated list in
+// WEDDING_RSVP_ORIGINS without redeploying any other setting.
+// ---------------------------------------------------------------------------
+const WEDDING_ORIGINS = (process.env.WEDDING_RSVP_ORIGINS || "https://rr188351.github.io")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+/** True for any local development origin, on any port. */
+function isLocalDevelopmentOrigin(origin) {
+  try {
+    const { hostname } = new URL(origin);
+    return (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "::1" ||
+      hostname === "[::1]"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** True for an allowed browser origin, or a request that carries none at all. */
+function isWeddingOriginAllowed(origin) {
+  // No Origin header: a same-origin call, a health probe or curl. CORS does not
+  // apply to these, so they are not refused.
+  if (!origin) return true;
+  if (WEDDING_ORIGINS.includes(origin)) return true;
+  return isLocalDevelopmentOrigin(origin);
+}
+
+app.use("/api/wedding", (req, res, next) => {
+  const origin = req.headers.origin;
+
+  if (!isWeddingOriginAllowed(origin)) {
+    return res.status(403).json({
+      error: "This origin may not use the wedding RSVP endpoint.",
+      code: "origin-not-allowed",
+    });
+  }
+
+  res.setHeader("Access-Control-Allow-Origin", origin || "*");
+  if (origin) res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Max-Age", "86400");
+
+  // Answer the preflight here: the guest's JSON POST cannot be sent without it.
+  if (req.method === "OPTIONS") return res.status(204).end();
+
+  return next();
+});
+
 app.use(
   cors(
     ALLOWED_ORIGINS.length
@@ -97,6 +178,22 @@ app.use(
       : {}
   )
 );
+
+// The global CORS middleware above has now run. When CORS_ORIGINS is configured
+// for Twiller it deliberately withholds its header from other origins - which
+// would silently strip the wedding reply's own header and leave a guest seeing a
+// failure AFTER their reply was already stored. The wedding allow-list is
+// re-asserted here, last, so the invitation site can always read the response
+// whatever Twiller's own CORS setting happens to be.
+app.use("/api/wedding", (req, res, next) => {
+  const origin = req.headers.origin;
+  if (isWeddingOriginAllowed(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin || "*");
+    if (origin) res.setHeader("Vary", "Origin");
+  }
+  return next();
+});
+
 app.use(express.json());
 
 app.get("/", (req, res) => {
@@ -123,6 +220,88 @@ app.get("/plans", (req, res) => {
       timeZone: "Asia/Kolkata",
     },
   });
+});
+
+// ===========================================================================
+// WEDDING RSVP - the reply form of the royal wedding invitation website.
+//
+// The invitation is a STATIC React site on GitHub Pages, so it has no server of
+// its own: this endpoint is the only place a guest's reply can be kept
+// permanently. Records are written to their own database
+// (`wedding_rsvp.guests`, see models/weddingRsvp.js) and never to a Twiller
+// collection.
+//
+// It is public by design - guests are anonymous - and therefore hardened:
+//   - origin-checked by the /api/wedding guard above;
+//   - rate limited per IP, with its own budget (the recovery limiter below is
+//     untouched and shares nothing with this one);
+//   - every field validated, type-checked and length-capped server-side;
+//   - a stable `requestId` makes a retried submission idempotent, so a guest
+//     with a flaky connection never lands on the guest list twice;
+//   - success is returned ONLY once MongoDB confirms the write;
+//   - THERE IS NO PUBLIC READ ROUTE. The guest list cannot be browsed, listed
+//     or exported through this API.
+// ===========================================================================
+const weddingRsvpLimiter = createIpRateLimiter({
+  max: Number(process.env.WEDDING_RSVP_RATE_LIMIT_MAX || 10),
+  windowMs: Number(process.env.WEDDING_RSVP_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000),
+});
+
+// Safe boot diagnostic: names only - no URI, no credentials. It answers the one
+// operational question worth answering at a glance: where do replies land?
+console.log(
+  `[wedding-rsvp] replies -> database="${WEDDING_RSVP_DB_NAME}", source="${WEDDING_RSVP_SOURCE}"`
+);
+
+app.post("/api/wedding/rsvp", async (req, res) => {
+  const limit = weddingRsvpLimiter.check(req.ip || "unknown");
+  if (!limit.allowed) {
+    res.setHeader("Retry-After", String(limit.retryAfterSeconds));
+    return res.status(429).json({
+      error:
+        "We have already received several replies from this device. Please try again a little later.",
+      code: "rate-limited",
+      retryAfterSeconds: limit.retryAfterSeconds,
+    });
+  }
+
+  try {
+    const saved = await saveWeddingRsvp(req.body);
+    const receivedAt =
+      saved.createdAt instanceof Date ? saved.createdAt : new Date();
+
+    return res.status(saved.duplicate ? 200 : 201).json({
+      ok: true,
+      saved: true,
+      id: saved.id,
+      duplicate: saved.duplicate,
+      receivedAt: receivedAt.toISOString(),
+    });
+  } catch (error) {
+    // A refusal never disguises itself as a success: the guest is told to retry
+    // when the reply could not be stored.
+    if (error instanceof WeddingRsvpValidationError) {
+      return res.status(400).json({
+        error: "Some of the reply details are not valid.",
+        code: "validation-error",
+        fields: error.errors.map((entry) => entry.field),
+      });
+    }
+
+    if (error instanceof WeddingRsvpUnavailableError) {
+      return res.status(503).json({
+        error: "We could not save your reply just now. Please try again in a moment.",
+        code: "storage-unavailable",
+      });
+    }
+
+    // Nothing about the database, the driver or the stack is echoed out.
+    console.error("Wedding RSVP unexpected error:", error?.message || error);
+    return res.status(500).json({
+      error: "We could not save your reply just now. Please try again in a moment.",
+      code: "internal-error",
+    });
+  }
 });
 
 const port = process.env.PORT || 5000;
