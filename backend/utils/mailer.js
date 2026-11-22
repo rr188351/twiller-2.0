@@ -284,7 +284,7 @@ function deliverViaConsole({ to, subject, body, kind }) {
  * are ready to switch OTP_DELIVERY to "smtp". Keeping it behind a dynamic
  * import means the mock mode has zero install cost.
  */
-async function deliverViaSmtp({ to, subject, body }) {
+async function deliverViaSmtp({ to, subject, body, html }) {
   const missing = missingSmtpEnv();
   if (missing.length > 0) {
     // Configuration fact only (variable NAMES) - never a credential value.
@@ -312,7 +312,14 @@ async function deliverViaSmtp({ to, subject, body }) {
   try {
     const options = smtpTransportOptions();
     const transport = nodemailer.createTransport(options);
-    await transport.sendMail({ from: mailFrom(), to, subject, text: body });
+    // `text` is always sent so the message is never empty in a plain-text client.
+    await transport.sendMail({
+      from: mailFrom(),
+      to,
+      subject,
+      text: body,
+      ...(html ? { html } : {}),
+    });
     return { delivered: true, status: "sent", provider: "smtp" };
   } catch (error) {
     const options = smtpTransportOptions();
@@ -407,7 +414,7 @@ export async function checkEmailDelivery() {
  * egress is blocked (e.g. Render Free). Same response contract as the SMTP
  * adapter, so no caller changes.
  */
-async function deliverViaBrevo({ to, subject, body }) {
+async function deliverViaBrevo({ to, subject, body, html }) {
   const missing = missingBrevoEnv();
   if (missing.length > 0) {
     // Configuration fact only (variable NAMES) - never a credential value.
@@ -436,6 +443,7 @@ async function deliverViaBrevo({ to, subject, body }) {
         to: [{ email: to }],
         subject,
         textContent: body,
+        ...(html ? { htmlContent: html } : {}),
       }),
       // A bounded budget: a hanging provider must never stall the OTP request.
       signal: AbortSignal.timeout(timeoutMs),
@@ -480,11 +488,15 @@ async function deliverViaBrevo({ to, subject, body }) {
 /**
  * Sends an email using the configured provider.
  *
- * @param {{to:string, subject:string, body:string, kind?:string, devCode?:string}} message
+ * @param {{to:string, subject:string, body:string, html?:string, kind?:string, devCode?:string}} message
+ *        `body` is always the plain-text version. `html` is an OPTIONAL richer
+ *        alternative: when it is supplied the provider carries both, so a client
+ *        that cannot render HTML still shows a complete message. Omitting it
+ *        leaves every existing caller's payload exactly as it was.
  * @returns {Promise<{delivered:boolean, provider:string, devCode?:string}>}
  *          `devCode` is present ONLY outside production.
  */
-export async function sendMail({ to, subject, body, kind = "generic", devCode }) {
+export async function sendMail({ to, subject, body, html, kind = "generic", devCode }) {
   const mode = resolveMailMode();
   let result;
 
@@ -493,8 +505,8 @@ export async function sendMail({ to, subject, body, kind = "generic", devCode })
     const provider = resolveMailProvider();
     result =
       provider === "brevo"
-        ? await deliverViaBrevo({ to, subject, body })
-        : await deliverViaSmtp({ to, subject, body });
+        ? await deliverViaBrevo({ to, subject, body, html })
+        : await deliverViaSmtp({ to, subject, body, html });
   } else if (mode === "console") {
     if (process.env.NODE_ENV === "production") {
       // Hard guard: the development mock must NEVER be used in production, even

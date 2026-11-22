@@ -56,11 +56,15 @@ import multer from "multer";
 // their OWN MongoDB database ("wedding_rsvp"), never in a Twiller collection.
 import {
   saveWeddingRsvp,
+  markWeddingConfirmationSent,
   WeddingRsvpValidationError,
   WeddingRsvpUnavailableError,
   WEDDING_RSVP_DB_NAME,
   WEDDING_RSVP_SOURCE,
 } from "./models/weddingRsvp.js";
+// The courtesy confirmation email: built and sent entirely server-side, through
+// whichever mail provider the backend already has configured.
+import { sendWeddingConfirmation } from "./utils/weddingMail.js";
 import { createIpRateLimiter } from "./utils/rateLimit.js";
 
 
@@ -253,6 +257,76 @@ console.log(
   `[wedding-rsvp] replies -> database="${WEDDING_RSVP_DB_NAME}", source="${WEDDING_RSVP_SOURCE}"`
 );
 
+/**
+ * How long the API waits for the mail provider before answering the guest.
+ *
+ * The reply is already stored by the time this is used, so the wait is purely
+ * about telling the guest, in one response, whether their thank-you email went
+ * out. SMTP's own timeouts (10s connect + 20s socket) can add up to more than the
+ * browser is willing to wait, so the courtesy step is bounded here: past this
+ * point the send may still complete, but the API stops holding the guest.
+ */
+const WEDDING_EMAIL_WAIT_MS = Number(
+  process.env.WEDDING_RSVP_EMAIL_WAIT_MS || 12000
+);
+
+/**
+ * Sends the thank-you email for a reply that is ALREADY stored.
+ *
+ * Three rules, in order:
+ *   1. Only an acceptance with an address gets a message.
+ *   2. A reply we have already seen (duplicate) or already emailed is never
+ *      emailed again, so a double-click or a retry cannot produce two copies.
+ *   3. Nothing here can fail the request - every path returns a status, and the
+ *      caller has already persisted the reply.
+ *
+ * @param {{id: string, attendance: string, email: string, name: string, duplicate: boolean, confirmationSent: boolean}} saved
+ * @returns {Promise<{status: "sent"|"failed"|"skipped"|"duplicate"}>}
+ */
+async function deliverConfirmation(saved) {
+  if (saved.attendance !== "accept" || !saved.email) {
+    return { status: "skipped" };
+  }
+
+  if (saved.duplicate || saved.confirmationSent) {
+    return { status: "duplicate" };
+  }
+
+  let timer = null;
+
+  try {
+    const result = await Promise.race([
+      sendWeddingConfirmation({ to: saved.email, name: saved.name }),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), WEDDING_EMAIL_WAIT_MS);
+        // Never hold the process open for a slow provider.
+        if (typeof timer?.unref === "function") timer.unref();
+      }),
+    ]);
+
+    if (!result) {
+      console.warn(
+        `[wedding-rsvp] confirmation email exceeded ${WEDDING_EMAIL_WAIT_MS}ms (the reply is stored)`
+      );
+      return { status: "failed" };
+    }
+
+    if (!result.delivered) {
+      // The mailer has already logged a redacted reason. The guest is told the
+      // reply arrived and the email did not - never the reverse.
+      return { status: "failed" };
+    }
+
+    // Only now is the courtesy recorded, so a retry cannot send a second copy.
+    await markWeddingConfirmationSent(saved.id, { provider: result.provider });
+    return { status: "sent" };
+  } catch {
+    return { status: "failed" };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 app.post("/api/wedding/rsvp", async (req, res) => {
   const limit = weddingRsvpLimiter.check(req.ip || "unknown");
   if (!limit.allowed) {
@@ -270,12 +344,19 @@ app.post("/api/wedding/rsvp", async (req, res) => {
     const receivedAt =
       saved.createdAt instanceof Date ? saved.createdAt : new Date();
 
+    // The reply is STORED from here on. What follows is a courtesy, and no
+    // outcome below may turn a stored reply into a failed one.
+    const email = await deliverConfirmation(saved);
+
     return res.status(saved.duplicate ? 200 : 201).json({
       ok: true,
       saved: true,
       id: saved.id,
       duplicate: saved.duplicate,
       receivedAt: receivedAt.toISOString(),
+      // "sent" | "failed" | "skipped" | "duplicate". The site chooses its
+      // success wording from this; a failed email is never a failed RSVP.
+      email,
     });
   } catch (error) {
     // A refusal never disguises itself as a success: the guest is told to retry

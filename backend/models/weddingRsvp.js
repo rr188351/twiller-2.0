@@ -54,6 +54,21 @@ export const MAX_NAME_LENGTH = 80;
 export const MAX_MESSAGE_LENGTH = 400;
 export const MAX_PARTY_SIZE = 5;
 export const MAX_REQUEST_ID_LENGTH = 64;
+/** An address is optional, but it can never be longer than this. */
+export const MAX_EMAIL_LENGTH = 254;
+
+/**
+ * A pragmatic address check.
+ *
+ * It is deliberately conservative about what it ACCEPTS - letters, digits and
+ * ordinary address punctuation only. That conservatism is also the security
+ * property: no space, comma, semicolon, angle bracket or quote can pass, so a
+ * submitted "address" can never smuggle in a second recipient or a mail header.
+ */
+const EMAIL_PATTERN =
+  /^[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
+/** A real TLD: two or more letters at the end of the domain. */
+const EMAIL_TLD_PATTERN = /\.[A-Za-z]{2,}$/;
 
 /**
  * The exact body keys this endpoint accepts. Anything else is a rejection: a
@@ -63,6 +78,7 @@ export const MAX_REQUEST_ID_LENGTH = 64;
 const ALLOWED_FIELDS = new Set([
   "attendance",
   "name",
+  "email",
   "partySize",
   "message",
   "requestId",
@@ -86,6 +102,16 @@ const WeddingRsvpSchema = new mongoose.Schema(
     },
     // How many are joining, 1-5 for an acceptance and 0 for a decline.
     partySize: { type: Number, default: 0, min: 0, max: MAX_PARTY_SIZE },
+    // The guest's email, when they chose to give one. Empty is the normal case:
+    // the reply is complete and valid without it.
+    email: { type: String, default: "", trim: true, maxlength: MAX_EMAIL_LENGTH },
+    // What happened to the courtesy confirmation email. Recording it is what
+    // guarantees a retried submission never posts a second copy.
+    confirmationEmail: {
+      sent: { type: Boolean, default: false },
+      sentAt: { type: Date, default: null },
+      provider: { type: String, default: "" },
+    },
     // The optional note for the couple.
     message: { type: String, default: "", trim: true, maxlength: MAX_MESSAGE_LENGTH },
     // Idempotency key. Unique: a retried submission resolves to this document.
@@ -230,6 +256,66 @@ function isPlainObject(value) {
 }
 
 /**
+ * Validates and normalises the OPTIONAL guest email.
+ *
+ * An empty value is not an error - it is simply "the guest chose not to give
+ * one", which is the default and the most common case. Only a value that was
+ * actually supplied is held to the format.
+ *
+ * @param {unknown} value
+ * @returns {{provided: boolean, value: string, valid: boolean, reason?: string}}
+ */
+export function normaliseWeddingEmail(value) {
+  if (value === undefined || value === null) {
+    return { provided: false, value: "", valid: true };
+  }
+  if (typeof value !== "string") {
+    return { provided: true, value: "", valid: false, reason: "Must be text." };
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    // Whitespace only is the same as leaving it empty, not a validation error.
+    return { provided: false, value: "", valid: true };
+  }
+
+  if (trimmed.length > MAX_EMAIL_LENGTH) {
+    return {
+      provided: true,
+      value: "",
+      valid: false,
+      reason: `Must be ${MAX_EMAIL_LENGTH} characters or fewer.`,
+    };
+  }
+
+  // Stored lower-case: an address is case-insensitive in practice, and this
+  // keeps two spellings of the same mailbox from looking like two people.
+  const address = trimmed.toLowerCase();
+  const [localPart, domain] = address.split("@");
+
+  const wellFormed =
+    address.split("@").length === 2 &&
+    Boolean(localPart) &&
+    Boolean(domain) &&
+    !localPart.startsWith(".") &&
+    !localPart.endsWith(".") &&
+    !address.includes("..") &&
+    EMAIL_PATTERN.test(address) &&
+    EMAIL_TLD_PATTERN.test(address);
+
+  if (!wellFormed) {
+    return {
+      provided: true,
+      value: "",
+      valid: false,
+      reason: "Please check the email address.",
+    };
+  }
+
+  return { provided: true, value: address, valid: true };
+}
+
+/**
  * Validates EVERYTHING before a byte reaches MongoDB.
  *
  * The route deliberately trusts nothing the browser sent - the frontend's own
@@ -328,6 +414,12 @@ export function validateWeddingRsvp(body) {
     }
   }
 
+  // --- email: optional, but never trusted when present --------------------
+  const email = normaliseWeddingEmail(body.email);
+  if (!email.valid) {
+    push("email", email.reason || "Please check the email address.");
+  }
+
   // --- requestId: the idempotency key -------------------------------------
   let requestId = "";
   if (
@@ -386,6 +478,7 @@ export function validateWeddingRsvp(body) {
     attendance,
     partySize,
     message,
+    email: email.value,
     requestId,
     capturedAt,
     source: WEDDING_RSVP_SOURCE,
@@ -425,6 +518,12 @@ export async function saveWeddingRsvp(body) {
         id: String(alreadyStored._id),
         duplicate: true,
         createdAt: alreadyStored.createdAt ?? null,
+        name: alreadyStored.name ?? "",
+        attendance: alreadyStored.attendance ?? "",
+        email: alreadyStored.email ?? "",
+        // Whether the courtesy email already went out for this reply. The route
+        // uses it so a retry can never post a second copy.
+        confirmationSent: Boolean(alreadyStored.confirmationEmail?.sent),
       };
     }
 
@@ -433,6 +532,10 @@ export async function saveWeddingRsvp(body) {
       id: String(created._id),
       duplicate: false,
       createdAt: created.createdAt ?? null,
+      name: created.name ?? "",
+      attendance: created.attendance ?? "",
+      email: created.email ?? "",
+      confirmationSent: false,
     };
   } catch (error) {
     // A repeated submission is a SUCCESS, not a failure: the guest's reply is
@@ -447,9 +550,21 @@ export async function saveWeddingRsvp(body) {
           id: String(existing._id),
           duplicate: true,
           createdAt: existing.createdAt ?? null,
+          name: existing.name ?? "",
+          attendance: existing.attendance ?? "",
+          email: existing.email ?? "",
+          confirmationSent: Boolean(existing.confirmationEmail?.sent),
         };
       }
-      return { id: "", duplicate: true, createdAt: null };
+      return {
+        id: "",
+        duplicate: true,
+        createdAt: null,
+        name: record.name,
+        attendance: record.attendance,
+        email: record.email,
+        confirmationSent: true,
+      };
     }
 
     // Should be unreachable (validateWeddingRsvp runs first), but if a document
@@ -470,6 +585,39 @@ export async function saveWeddingRsvp(body) {
   }
 }
 
+/**
+ * Records that the courtesy confirmation was sent.
+ *
+ * This flag is the reason a retry can never produce a second email: the route
+ * reads it before it considers sending at all, and writes it only after the
+ * provider accepted the message.
+ *
+ * Deliberately best-effort: if the flag write fails the reply is still stored
+ * and still a success, and the log line below is the only trace. It can never
+ * throw into the route.
+ *
+ * @param {string} id the stored RSVP's id
+ * @param {{provider?: string}} [meta]
+ * @returns {Promise<boolean>} whether the flag was written
+ */
+export async function markWeddingConfirmationSent(id, { provider = "" } = {}) {
+  const WeddingRsvp = getWeddingRsvpModel();
+  if (!WeddingRsvp || !id) return false;
+
+  try {
+    await WeddingRsvp.updateOne(
+      { _id: id },
+      { $set: { confirmationEmail: { sent: true, sentAt: new Date(), provider } } }
+    );
+    return true;
+  } catch (error) {
+    console.warn(
+      `[wedding-rsvp] could not record the confirmation email: ${error?.name || "Error"}`
+    );
+    return false;
+  }
+}
+
 export default {
   WEDDING_RSVP_DB_NAME,
   WEDDING_RSVP_COLLECTION,
@@ -479,10 +627,13 @@ export default {
   MAX_MESSAGE_LENGTH,
   MAX_PARTY_SIZE,
   MAX_REQUEST_ID_LENGTH,
+  MAX_EMAIL_LENGTH,
   getWeddingConnection,
   getWeddingRsvpModel,
+  normaliseWeddingEmail,
   validateWeddingRsvp,
   saveWeddingRsvp,
+  markWeddingConfirmationSent,
   WeddingRsvpValidationError,
   WeddingRsvpUnavailableError,
 };
