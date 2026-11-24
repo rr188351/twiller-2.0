@@ -8,7 +8,8 @@
     "start": "node index.js",
     "start:dev": "nodemon index.js",
     "test": "node tests/feature6.test.js",
-    "test:all": "node tests/feature6.test.js"
+    "test:all": "node tests/feature6.test.js",
+    "test:wedding": "node tests/wedding-rsvp-party-size.test.js"
   },
   "keywords": [],
   "author": "",

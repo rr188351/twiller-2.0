@@ -54,7 +54,13 @@ export const MAX_NAME_LENGTH = 80;
 /** The most names one public response may carry. */
 export const MAX_PUBLIC_GUEST_NAMES = 500;
 export const MAX_MESSAGE_LENGTH = 400;
-export const MAX_PARTY_SIZE = 5;
+/**
+ * The largest party an acceptance may declare, 1-12 for an acceptance and 0 for
+ * a decline. The invitation's dropdown offers exactly this range, this validator
+ * enforces it, and the schema below repeats it - so the three can never drift
+ * into the situation where the form offers a number the API quietly refuses.
+ */
+export const MAX_PARTY_SIZE = 12;
 export const MAX_REQUEST_ID_LENGTH = 64;
 /** An address is optional, but it can never be longer than this. */
 export const MAX_EMAIL_LENGTH = 254;
@@ -102,7 +108,7 @@ const WeddingRsvpSchema = new mongoose.Schema(
       required: true,
       enum: ATTENDANCE_VALUES,
     },
-    // How many are joining, 1-5 for an acceptance and 0 for a decline.
+    // How many are joining, 1-12 for an acceptance and 0 for a decline.
     partySize: { type: Number, default: 0, min: 0, max: MAX_PARTY_SIZE },
     // The guest's email, when they chose to give one. Empty is the normal case:
     // the reply is complete and valid without it.
@@ -380,7 +386,7 @@ export function validateWeddingRsvp(body) {
     push("name", "Please tell us who is replying.");
   }
 
-  // --- partySize: 1-5 when accepting, 0 when declining ---------------------
+  // --- partySize: 1-12 when accepting, 0 when declining --------------------
   let partySize = 0;
   if (body.partySize !== undefined && body.partySize !== null) {
     const raw = body.partySize;
