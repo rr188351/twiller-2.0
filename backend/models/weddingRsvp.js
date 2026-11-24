@@ -686,6 +686,74 @@ export async function listAcceptedGuestNames({ limit = MAX_PUBLIC_GUEST_NAMES } 
     .filter(Boolean);
 }
 
+/**
+ * The largest reply list the administrator's viewer will ever be handed. A
+ * wedding does not have more than this many answers; the cap simply bounds one
+ * response's size.
+ */
+export const MAX_ADMIN_REPLIES = 2000;
+
+/**
+ * The ADMINISTRATOR's view: every reply, with the four fields the viewer shows.
+ *
+ * This is the second read path into the collection, and it exists only behind
+ * the admin token check in `index.js`. It is deliberately still narrow:
+ *
+ *   · both acceptances and regrets are returned, because the couple's own viewer
+ *     is meant to show every answer they received;
+ *   · the projection is server-side and fixed - name, party size, message and the
+ *     write time. An email, a request id, a confirmation-email record, an object
+ *     id or a source marker is never read, let alone returned;
+ *   · newest first, which is the order the couple reads them in;
+ *   · fields are trimmed and length-capped exactly like the public wall, so a
+ *     stored value can never be longer than what the schema allowed.
+ *
+ * @param {{limit?: number}} [options]
+ * @returns {Promise<Array<{name: string, partySize: number, message: string, rsvpDate: string|null}>>}
+ * @throws {WeddingRsvpUnavailableError}
+ */
+export async function listWeddingReplies({ limit = MAX_ADMIN_REPLIES } = {}) {
+  const WeddingRsvp = getWeddingRsvpModel();
+  if (!WeddingRsvp) throw new WeddingRsvpUnavailableError();
+
+  const safeLimit =
+    Number.isInteger(limit) && limit > 0
+      ? Math.min(limit, MAX_ADMIN_REPLIES)
+      : MAX_ADMIN_REPLIES;
+
+  let docs;
+  try {
+    docs = await WeddingRsvp.find(
+      {},
+      // `createdAt` is when the write reached MongoDB; `capturedAt` is only a
+      // fallback for a record that somehow carries no write time.
+      { name: 1, partySize: 1, message: 1, createdAt: 1, capturedAt: 1, _id: 0 }
+    )
+      .sort({ createdAt: -1 })
+      .limit(safeLimit)
+      .lean();
+  } catch (error) {
+    console.warn(`[wedding-replies] read failed: ${error?.name || "Error"}`);
+    throw new WeddingRsvpUnavailableError();
+  }
+
+  return docs.map((doc) => {
+    const when =
+      doc?.createdAt instanceof Date
+        ? doc.createdAt
+        : doc?.capturedAt instanceof Date
+          ? doc.capturedAt
+          : null;
+
+    return {
+      name: String(doc?.name ?? "").trim().slice(0, MAX_NAME_LENGTH),
+      partySize: Number.isInteger(doc?.partySize) ? doc.partySize : 0,
+      message: String(doc?.message ?? "").trim().slice(0, MAX_MESSAGE_LENGTH),
+      rsvpDate: when ? when.toISOString() : null,
+    };
+  });
+}
+
 export default {
   WEDDING_RSVP_DB_NAME,
   WEDDING_RSVP_COLLECTION,
@@ -697,12 +765,14 @@ export default {
   MAX_REQUEST_ID_LENGTH,
   MAX_EMAIL_LENGTH,
   MAX_PUBLIC_GUEST_NAMES,
+  MAX_ADMIN_REPLIES,
   getWeddingConnection,
   getWeddingRsvpModel,
   normaliseWeddingEmail,
   validateWeddingRsvp,
   saveWeddingRsvp,
   listAcceptedGuestNames,
+  listWeddingReplies,
   markWeddingConfirmationSent,
   WeddingRsvpValidationError,
   WeddingRsvpUnavailableError,

@@ -58,11 +58,20 @@ import {
   saveWeddingRsvp,
   markWeddingConfirmationSent,
   listAcceptedGuestNames,
+  listWeddingReplies,
   WeddingRsvpValidationError,
   WeddingRsvpUnavailableError,
   WEDDING_RSVP_DB_NAME,
   WEDDING_RSVP_SOURCE,
 } from "./models/weddingRsvp.js";
+// The guest-response viewer's own sign-in: environment credentials, a
+// constant-time comparison and a short-lived signed token. See utils/weddingAdmin.js.
+import {
+  adminAccessStatus,
+  issueAdminToken,
+  verifyAdminCredentials,
+  verifyAdminToken,
+} from "./utils/weddingAdmin.js";
 // The courtesy confirmation email: built and sent entirely server-side, through
 // whichever mail provider the backend already has configured.
 import { sendWeddingConfirmation } from "./utils/weddingMail.js";
@@ -161,8 +170,11 @@ app.use("/api/wedding", (req, res, next) => {
 
   res.setHeader("Access-Control-Allow-Origin", origin || "*");
   if (origin) res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  // GET is the administrator's read (and the public guest wall); POST is a
+  // guest's reply and the administrator's sign-in. Authorization carries the
+  // administrator's signed token.
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age", "86400");
 
   // Answer the preflight here: the guest's JSON POST cannot be sent without it.
@@ -448,6 +460,162 @@ app.get("/api/wedding/guests", async (req, res) => {
       success: false,
       code: "internal-error",
       error: "The guest list is unavailable for a moment.",
+    });
+  }
+});
+
+// ===========================================================================
+// WEDDING ADMIN - the couple's own guest-response viewer (READ ONLY).
+//
+// The viewer page (`Wedding/public/viewguest.html`) is plain HTML on GitHub
+// Pages, so the page's URL protects nothing: THESE ROUTES ARE THE LOCK. They
+// read the four fields the page shows and nothing else, they can only be read
+// (no POST/PUT/PATCH/DELETE on the data path at all), and every request must
+// carry a token signed by this server with a secret only the server holds.
+//
+// The credentials live in the SERVER environment - never in the page, the
+// repository or the browser. When they are absent the routes answer 503, so a
+// misconfigured deployment fails shut rather than open.
+// ===========================================================================
+const weddingAdminLoginLimiter = createIpRateLimiter({
+  max: Number(process.env.WEDDING_ADMIN_LOGIN_RATE_LIMIT_MAX || 10),
+  windowMs: Number(process.env.WEDDING_ADMIN_LOGIN_WINDOW_MS || 15 * 60 * 1000),
+});
+const weddingAdminReadLimiter = createIpRateLimiter({
+  max: Number(process.env.WEDDING_ADMIN_READ_RATE_LIMIT_MAX || 120),
+  windowMs: Number(process.env.WEDDING_ADMIN_READ_WINDOW_MS || 15 * 60 * 1000),
+});
+
+/** Safe boot diagnostic: whether the viewer is usable, and nothing else. */
+{
+  const status = adminAccessStatus();
+  console.log(
+    status.configured
+      ? "[wedding-admin] guest viewer sign-in is configured"
+      : `[wedding-admin] guest viewer sign-in is NOT configured (missing: ${status.missing.join(
+          ", "
+        )}) - the viewer will refuse every request`
+  );
+}
+
+/** The bearer token from an Authorization header, or an empty string. */
+function bearerToken(req) {
+  const header = String(req.headers.authorization || "");
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  return match ? match[1].trim() : "";
+}
+
+/**
+ * The only thing standing between a stranger and the guest list.
+ *
+ * Answers 503 when the deployment is unconfigured (fail shut), 401 for any
+ * missing, forged, edited or expired token.
+ */
+function requireWeddingAdmin(req, res, next) {
+  if (!adminAccessStatus().configured) {
+    return res.status(503).json({
+      success: false,
+      code: "viewer-not-configured",
+      error: "The guest viewer is not configured on this server.",
+    });
+  }
+
+  const result = verifyAdminToken(bearerToken(req));
+  if (!result.valid) {
+    return res.status(401).json({
+      success: false,
+      code: "unauthorized",
+      error: "Please sign in to view the guest responses.",
+    });
+  }
+
+  return next();
+}
+
+/**
+ * Sign in. Answers with a short-lived signed token; the password itself never
+ * travels again after this call.
+ */
+app.post("/api/wedding/admin/login", (req, res) => {
+  const status = adminAccessStatus();
+  if (!status.configured) {
+    return res.status(503).json({
+      success: false,
+      code: "viewer-not-configured",
+      error: "The guest viewer is not configured on this server.",
+    });
+  }
+
+  const limit = weddingAdminLoginLimiter.check(req.ip || "unknown");
+  if (!limit.allowed) {
+    res.setHeader("Retry-After", String(limit.retryAfterSeconds));
+    return res.status(429).json({
+      success: false,
+      code: "rate-limited",
+      error: "Too many sign-in attempts. Please try again shortly.",
+      retryAfterSeconds: limit.retryAfterSeconds,
+    });
+  }
+
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+
+  if (!verifyAdminCredentials({ user: body.user, password: body.password })) {
+    // One message for both halves: which one was wrong is not the caller's
+    // business, and saying so would only help a guess.
+    return res.status(401).json({
+      success: false,
+      code: "invalid-credentials",
+      error: "That user name or password was not recognised.",
+    });
+  }
+
+  const issued = issueAdminToken();
+  res.setHeader("Cache-Control", "no-store");
+  return res.status(200).json({
+    success: true,
+    token: issued.token,
+    expiresAt: issued.expiresAt,
+  });
+});
+
+/**
+ * The guest responses themselves. Four fields, newest first, read-only.
+ */
+app.get("/api/wedding/admin/guests", requireWeddingAdmin, async (req, res) => {
+  const limit = weddingAdminReadLimiter.check(req.ip || "unknown");
+  if (!limit.allowed) {
+    res.setHeader("Retry-After", String(limit.retryAfterSeconds));
+    return res.status(429).json({
+      success: false,
+      code: "rate-limited",
+      error: "Too many requests. Please try again shortly.",
+      retryAfterSeconds: limit.retryAfterSeconds,
+    });
+  }
+
+  try {
+    const guests = await listWeddingReplies();
+
+    // Never cached: an administrator who has just reloaded should see the reply
+    // that arrived a minute ago.
+    res.setHeader("Cache-Control", "no-store");
+
+    // The whole contract of this endpoint: the four fields the table renders.
+    return res.status(200).json({ success: true, guests });
+  } catch (error) {
+    if (error instanceof WeddingRsvpUnavailableError) {
+      return res.status(503).json({
+        success: false,
+        code: "storage-unavailable",
+        error: "The guest responses are unavailable for a moment.",
+      });
+    }
+
+    console.error("Wedding admin read error:", error?.message || error);
+    return res.status(500).json({
+      success: false,
+      code: "internal-error",
+      error: "The guest responses are unavailable for a moment.",
     });
   }
 });
