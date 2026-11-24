@@ -51,6 +51,8 @@ export const WEDDING_RSVP_SOURCE = "wedding_invitation";
 
 /** Field limits, mirrored exactly by the validation below. */
 export const MAX_NAME_LENGTH = 80;
+/** The most names one public response may carry. */
+export const MAX_PUBLIC_GUEST_NAMES = 500;
 export const MAX_MESSAGE_LENGTH = 400;
 export const MAX_PARTY_SIZE = 5;
 export const MAX_REQUEST_ID_LENGTH = 64;
@@ -177,16 +179,26 @@ export function getWeddingConnection() {
   const uri = (process.env.MONOGDB_URL || process.env.MONGODB_URL || "").trim();
   if (!uri) return null;
 
-  weddingConnection = mongoose.createConnection(uri, {
-    // The whole point of this module: a database of its own.
-    dbName: WEDDING_RSVP_DB_NAME,
-    // A guest is waiting on the response, so fail fast rather than hang, and
-    // keep the pool small - the free Atlas tier does not need a second big one.
-    serverSelectionTimeoutMS: 8000,
-    bufferTimeoutMS: 12000,
-    maxPoolSize: 5,
-    minPoolSize: 0,
-  });
+  try {
+    weddingConnection = mongoose.createConnection(uri, {
+      // The whole point of this module: a database of its own.
+      dbName: WEDDING_RSVP_DB_NAME,
+      // A guest is waiting on the response, so fail fast rather than hang, and
+      // keep the pool small - the free Atlas tier does not need a second big one.
+      serverSelectionTimeoutMS: 8000,
+      bufferTimeoutMS: 12000,
+      maxPoolSize: 5,
+      minPoolSize: 0,
+    });
+  } catch (error) {
+    // A configuration the driver refuses outright (an impossible database name,
+    // for instance) degrades to "unavailable" rather than throwing into a
+    // request: the read route answers 503 and the guest sees a retry line.
+    console.warn(
+      `[wedding-rsvp] could not open the wedding connection: ${error?.name || "Error"}`
+    );
+    return null;
+  }
 
   weddingConnection.on("connected", () => {
     console.log(
@@ -618,6 +630,56 @@ export async function markWeddingConfirmationSent(id, { provider = "" } = {}) {
   }
 }
 
+/**
+ * The PUBLIC guest wall: the display names of the guests who accepted.
+ *
+ * This is the only read path into the wedding RSVP collection, and it is
+ * deliberately the narrowest thing that can still render the wall:
+ *
+ *   · `attendance: "accept"` is the filter, applied BY MONGO, so a regret can
+ *     never reach the public list - not even if the caller asks for it;
+ *   · the projection carries `name` and nothing else, so email, message, party
+ *     size, request id, ids and timestamps are never even read from the disk,
+ *     let alone returned;
+ *   · the order is the order in which people replied, which is the order the
+ *     couple would want to read them in.
+ *
+ * @param {{limit?: number}} [options]
+ * @returns {Promise<string[]>} clean display names, oldest reply first
+ * @throws {WeddingRsvpUnavailableError}
+ */
+export async function listAcceptedGuestNames({ limit = MAX_PUBLIC_GUEST_NAMES } = {}) {
+  const WeddingRsvp = getWeddingRsvpModel();
+  if (!WeddingRsvp) throw new WeddingRsvpUnavailableError();
+
+  const safeLimit =
+    Number.isInteger(limit) && limit > 0
+      ? Math.min(limit, MAX_PUBLIC_GUEST_NAMES)
+      : MAX_PUBLIC_GUEST_NAMES;
+
+  let docs;
+  try {
+    docs = await WeddingRsvp.find(
+      // Server-side filter: only acceptances, and only ones that carry a name.
+      { attendance: "accept", name: { $nin: ["", null] } },
+      // Server-side projection: `name`, and nothing else. Never `_id`.
+      { name: 1, _id: 0 }
+    )
+      .sort({ createdAt: 1 })
+      .limit(safeLimit)
+      .lean();
+  } catch (error) {
+    // A database problem is reported as "unavailable" - the driver's own
+    // message is never forwarded to a public caller.
+    console.warn(`[wedding-guests] read failed: ${error?.name || "Error"}`);
+    throw new WeddingRsvpUnavailableError();
+  }
+
+  return docs
+    .map((doc) => String(doc?.name ?? "").trim().slice(0, MAX_NAME_LENGTH))
+    .filter(Boolean);
+}
+
 export default {
   WEDDING_RSVP_DB_NAME,
   WEDDING_RSVP_COLLECTION,
@@ -628,11 +690,13 @@ export default {
   MAX_PARTY_SIZE,
   MAX_REQUEST_ID_LENGTH,
   MAX_EMAIL_LENGTH,
+  MAX_PUBLIC_GUEST_NAMES,
   getWeddingConnection,
   getWeddingRsvpModel,
   normaliseWeddingEmail,
   validateWeddingRsvp,
   saveWeddingRsvp,
+  listAcceptedGuestNames,
   markWeddingConfirmationSent,
   WeddingRsvpValidationError,
   WeddingRsvpUnavailableError,

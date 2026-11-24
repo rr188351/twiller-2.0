@@ -57,6 +57,7 @@ import multer from "multer";
 import {
   saveWeddingRsvp,
   markWeddingConfirmationSent,
+  listAcceptedGuestNames,
   WeddingRsvpValidationError,
   WeddingRsvpUnavailableError,
   WEDDING_RSVP_DB_NAME,
@@ -381,6 +382,72 @@ app.post("/api/wedding/rsvp", async (req, res) => {
     return res.status(500).json({
       error: "We could not save your reply just now. Please try again in a moment.",
       code: "internal-error",
+    });
+  }
+});
+
+// ===========================================================================
+// WEDDING GUESTS - the public celebration wall (READ ONLY).
+//
+// Phase 19. The invitation celebrates the guests who accepted, and this endpoint
+// is the only thing that feeds that wall. It is the narrowest read path the
+// wedding data has:
+//
+//   · GET only. There is no POST, PUT, PATCH or DELETE on this path, so nothing
+//     on the public internet can create, change or remove a reply;
+//   · the filter (`attendance: "accept"`) and the projection (`name` only) are
+//     applied BY MONGO - see listAcceptedGuestNames - so an email address, a
+//     message, a party size, a request id, an object id or a timestamp is never
+//     read from the database, let alone returned;
+//   · its own rate-limit budget, sized for a section that polls gently: a family
+//     on one connection with several phones still sits far below it;
+//   · no caching, so a name appears as soon as the reply is stored.
+// ===========================================================================
+const weddingGuestsLimiter = createIpRateLimiter({
+  max: Number(process.env.WEDDING_GUESTS_RATE_LIMIT_MAX || 200),
+  windowMs: Number(
+    process.env.WEDDING_GUESTS_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000
+  ),
+});
+
+app.get("/api/wedding/guests", async (req, res) => {
+  const limit = weddingGuestsLimiter.check(req.ip || "unknown");
+  if (!limit.allowed) {
+    res.setHeader("Retry-After", String(limit.retryAfterSeconds));
+    return res.status(429).json({
+      success: false,
+      code: "rate-limited",
+      error: "Too many requests from this device. Please try again shortly.",
+      retryAfterSeconds: limit.retryAfterSeconds,
+    });
+  }
+
+  try {
+    const names = await listAcceptedGuestNames();
+
+    // Always fresh: the payload is tiny and the query is indexed, so a guest who
+    // has just accepted does not have to wait for a cache to expire.
+    res.setHeader("Cache-Control", "no-store");
+
+    // The whole public contract: a display name per guest, and nothing else.
+    return res.status(200).json({
+      success: true,
+      guests: names.map((name) => ({ name })),
+    });
+  } catch (error) {
+    if (error instanceof WeddingRsvpUnavailableError) {
+      return res.status(503).json({
+        success: false,
+        code: "storage-unavailable",
+        error: "The guest list is unavailable for a moment.",
+      });
+    }
+
+    console.error("Wedding guests read error:", error?.message || error);
+    return res.status(500).json({
+      success: false,
+      code: "internal-error",
+      error: "The guest list is unavailable for a moment.",
     });
   }
 });
